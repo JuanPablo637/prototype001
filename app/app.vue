@@ -173,7 +173,7 @@ async function procesarImagen() {
     */
     const { createWorker } = await import('tesseract.js')
 
-    const worker = await createWorker('spa', 1, {
+    const worker = await createWorker('spa+eng', 1, {
       logger: (m) => {
         if (m.status === 'recognizing text') {
           progresoOCR.value = Math.round(m.progress * 100)
@@ -181,8 +181,14 @@ async function procesarImagen() {
       }
     })
 
-    const result = await worker.recognize(imagenFile.value)
+    await worker.setParameters({
+      tessedit_pageseg_mode: '6',
+      preserve_interword_spaces: '1'
+    })
 
+    const imagenProcesada = await preprocesarImagen(imagenFile.value)
+    const result = await worker.recognize(imagenProcesada)
+    
     textoOCR.value = result.data.text || ''
 
     await worker.terminate()
@@ -206,6 +212,82 @@ async function procesarImagen() {
     procesando.value = false
   }
 }
+
+
+function preprocesarImagen(file) {
+  return new Promise((resolve, reject) => {
+    const img = new Image()
+    const reader = new FileReader()
+
+    reader.onload = (e) => {
+      img.src = e.target.result
+    }
+
+    img.onload = () => {
+      const canvas = document.createElement('canvas')
+      const ctx = canvas.getContext('2d')
+
+      /*
+        Aumentamos la imagen para que el OCR tenga más detalle.
+        Para comprobantes, 1600px de ancho funciona mejor que una foto pequeña.
+      */
+      const anchoObjetivo = 1600
+      const escala = anchoObjetivo / img.width
+
+      canvas.width = anchoObjetivo
+      canvas.height = img.height * escala
+
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+      const data = imageData.data
+
+      for (let i = 0; i < data.length; i += 4) {
+        const r = data[i]
+        const g = data[i + 1]
+        const b = data[i + 2]
+
+        // Convertir a gris
+        let gris = 0.299 * r + 0.587 * g + 0.114 * b
+
+        // Aumentar contraste
+        gris = gris < 150 ? gris * 0.75 : gris * 1.25
+
+        // Blanco y negro
+        const valor = gris > 165 ? 255 : 0
+
+        data[i] = valor
+        data[i + 1] = valor
+        data[i + 2] = valor
+      }
+
+      ctx.putImageData(imageData, 0, 0)
+
+      canvas.toBlob(
+        (blob) => {
+          if (!blob) {
+            reject(new Error('No se pudo procesar la imagen'))
+            return
+          }
+
+          resolve(blob)
+        },
+        'image/png',
+        1
+      )
+    }
+
+    img.onerror = () => {
+      reject(new Error('No se pudo cargar la imagen'))
+    }
+
+    reader.readAsDataURL(file)
+  })
+}
+
+
+
+
 
 function extraerDatos(textoOriginal) {
   const texto = limpiarTexto(textoOriginal)
