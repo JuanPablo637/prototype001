@@ -139,20 +139,37 @@ const form = reactive({
 })
 
 function seleccionarImagen(event) {
-  const file = event.target.files[0]
+  const file = event.target.files?.[0]
 
-  if (!file) return
+  if (!file) {
+    mensaje.value = 'No se seleccionó ninguna imagen.'
+    return
+  }
+
+  if (!file.type.startsWith('image/')) {
+    mensaje.value = 'El archivo seleccionado no es una imagen.'
+    return
+  }
 
   imagenFile.value = file
+
+  if (imagenPreview.value) {
+    URL.revokeObjectURL(imagenPreview.value)
+  }
+
   imagenPreview.value = URL.createObjectURL(file)
 
   datosProcesados.value = false
   textoOCR.value = ''
   mostrarTextoOCR.value = false
   progresoOCR.value = 0
-  mensaje.value = 'Imagen cargada correctamente. Ahora presiona Procesar.'
 
   limpiarFormulario()
+
+  mensaje.value = 'Imagen cargada correctamente. Ahora presiona Procesar.'
+
+  // Permite volver a seleccionar la misma foto si quieres probar de nuevo
+  event.target.value = ''
 }
 
 async function procesarImagen() {
@@ -161,19 +178,17 @@ async function procesarImagen() {
     return
   }
 
+  let worker = null
+
   try {
     procesando.value = true
     datosProcesados.value = false
     progresoOCR.value = 0
-    mensaje.value = 'Leyendo imagen. Espera unos segundos...'
+    mensaje.value = 'Preparando imagen para OCR...'
 
-    /*
-      Importación dinámica:
-      Esto evita problemas con Nuxt/SSR porque Tesseract se carga solo en el navegador.
-    */
     const { createWorker } = await import('tesseract.js')
 
-    const worker = await createWorker('spa+eng', 1, {
+    worker = await createWorker('spa', 1, {
       logger: (m) => {
         if (m.status === 'recognizing text') {
           progresoOCR.value = Math.round(m.progress * 100)
@@ -186,12 +201,20 @@ async function procesarImagen() {
       preserve_interword_spaces: '1'
     })
 
-    const imagenProcesada = await preprocesarImagen(imagenFile.value)
-    const result = await worker.recognize(imagenProcesada)
-    
-    textoOCR.value = result.data.text || ''
+    mensaje.value = 'Procesando imagen con OCR...'
 
-    await worker.terminate()
+    let imagenParaOCR
+
+    try {
+      imagenParaOCR = await preprocesarImagen(imagenFile.value)
+    } catch (errorPreproceso) {
+      console.warn('Falló el preprocesamiento. Se usará la imagen original:', errorPreproceso)
+      imagenParaOCR = imagenFile.value
+    }
+
+    const result = await worker.recognize(imagenParaOCR)
+
+    textoOCR.value = result.data.text || ''
 
     const datos = extraerDatos(textoOCR.value)
 
@@ -206,9 +229,13 @@ async function procesarImagen() {
     datosProcesados.value = true
     mensaje.value = 'OCR terminado. Revisa los campos antes de subir.'
   } catch (error) {
-    console.error(error)
-    mensaje.value = 'Error al procesar la imagen. Prueba con una foto más clara.'
+    console.error('Error OCR:', error)
+    mensaje.value = 'Error al procesar la imagen. Prueba con otra foto más clara o vuelve a cargarla.'
   } finally {
+    if (worker) {
+      await worker.terminate()
+    }
+
     procesando.value = false
   }
 }
@@ -216,69 +243,73 @@ async function procesarImagen() {
 
 function preprocesarImagen(file) {
   return new Promise((resolve, reject) => {
-    const img = new Image()
     const reader = new FileReader()
+    const img = new Image()
 
-    reader.onload = (e) => {
-      img.src = e.target.result
+    reader.onload = () => {
+      img.src = reader.result
     }
 
     img.onload = () => {
-      const canvas = document.createElement('canvas')
-      const ctx = canvas.getContext('2d')
+      try {
+        const canvas = document.createElement('canvas')
+        const ctx = canvas.getContext('2d')
 
-      /*
-        Aumentamos la imagen para que el OCR tenga más detalle.
-        Para comprobantes, 1600px de ancho funciona mejor que una foto pequeña.
-      */
-      const anchoObjetivo = 1600
-      const escala = anchoObjetivo / img.width
+        // No usar tamaño gigante porque en celular puede fallar
+        const maxAncho = 1200
+        const escala = img.width > maxAncho ? maxAncho / img.width : 1
 
-      canvas.width = anchoObjetivo
-      canvas.height = img.height * escala
+        canvas.width = Math.round(img.width * escala)
+        canvas.height = Math.round(img.height * escala)
 
-      ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
 
-      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
-      const data = imageData.data
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+        const data = imageData.data
 
-      for (let i = 0; i < data.length; i += 4) {
-        const r = data[i]
-        const g = data[i + 1]
-        const b = data[i + 2]
+        for (let i = 0; i < data.length; i += 4) {
+          const r = data[i]
+          const g = data[i + 1]
+          const b = data[i + 2]
 
-        // Convertir a gris
-        let gris = 0.299 * r + 0.587 * g + 0.114 * b
+          // Escala de grises, pero sin blanco/negro agresivo
+          let gris = 0.299 * r + 0.587 * g + 0.114 * b
 
-        // Aumentar contraste
-        gris = gris < 150 ? gris * 0.75 : gris * 1.25
+          // Contraste suave
+          gris = gris > 128
+            ? Math.min(255, gris * 1.15)
+            : Math.max(0, gris * 0.85)
 
-        // Blanco y negro
-        const valor = gris > 165 ? 255 : 0
+          data[i] = gris
+          data[i + 1] = gris
+          data[i + 2] = gris
+        }
 
-        data[i] = valor
-        data[i + 1] = valor
-        data[i + 2] = valor
+        ctx.putImageData(imageData, 0, 0)
+
+        canvas.toBlob(
+          (blob) => {
+            if (!blob) {
+              reject(new Error('No se pudo convertir la imagen para OCR'))
+              return
+            }
+
+            resolve(blob)
+          },
+          'image/jpeg',
+          0.9
+        )
+      } catch (error) {
+        reject(error)
       }
-
-      ctx.putImageData(imageData, 0, 0)
-
-      canvas.toBlob(
-        (blob) => {
-          if (!blob) {
-            reject(new Error('No se pudo procesar la imagen'))
-            return
-          }
-
-          resolve(blob)
-        },
-        'image/png',
-        1
-      )
     }
 
     img.onerror = () => {
-      reject(new Error('No se pudo cargar la imagen'))
+      reject(new Error('No se pudo cargar la imagen en el navegador'))
+    }
+
+    reader.onerror = () => {
+      reject(new Error('No se pudo leer el archivo seleccionado'))
     }
 
     reader.readAsDataURL(file)
