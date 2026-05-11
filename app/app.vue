@@ -18,6 +18,46 @@
         <span>📷 Tomar foto del comprobante</span>
       </label>
 
+
+
+      <!-- EDITOR DE RECORTE -->
+      <div v-if="mostrarEditorRecorte" class="crop-modal">
+        <div class="crop-card">
+          <h2>Recortar comprobante</h2>
+
+          <p class="crop-help">
+            Ajusta el cuadro para que solo quede la boleta, factura o guía. Evita mesa, fondo y sombras.
+          </p>
+
+          <ClientOnly>
+            <Cropper
+              ref="cropperRef"
+              class="cropper"
+              :src="imagenOriginalPreview"
+              :stencil-props="{
+                movable: true,
+                resizable: true
+              }"
+              :resize-image="{
+                wheel: true,
+                touch: true
+              }"
+              image-restriction="stencil"
+            />
+          </ClientOnly>
+
+          <div class="crop-buttons">
+            <button class="btn cancel" @click="cancelarRecorte">
+              Cancelar
+            </button>
+
+            <button class="btn primary" @click="confirmarRecorte">
+              Usar recorte
+            </button>
+          </div>
+        </div>
+      </div>
+
       <!-- VISTA PREVIA -->
       <div v-if="imagenPreview" class="preview-container">
         <h2>Vista previa</h2>
@@ -119,6 +159,14 @@
 <script setup>
 import { reactive, ref } from 'vue'
 
+import { Cropper } from 'vue-advanced-cropper'
+import 'vue-advanced-cropper/dist/style.css'
+
+
+const cropperRef = ref(null)
+const imagenOriginalPreview = ref('')
+const mostrarEditorRecorte = ref(false)
+
 const imagenFile = ref(null)
 const imagenPreview = ref('')
 const datosProcesados = ref(false)
@@ -151,13 +199,19 @@ function seleccionarImagen(event) {
     return
   }
 
-  imagenFile.value = file
+  if (imagenOriginalPreview.value) {
+    URL.revokeObjectURL(imagenOriginalPreview.value)
+  }
 
   if (imagenPreview.value) {
     URL.revokeObjectURL(imagenPreview.value)
   }
 
-  imagenPreview.value = URL.createObjectURL(file)
+  imagenOriginalPreview.value = URL.createObjectURL(file)
+
+  imagenFile.value = null
+  imagenPreview.value = ''
+  mostrarEditorRecorte.value = true
 
   datosProcesados.value = false
   textoOCR.value = ''
@@ -166,11 +220,62 @@ function seleccionarImagen(event) {
 
   limpiarFormulario()
 
-  mensaje.value = 'Imagen cargada correctamente. Ahora presiona Procesar.'
+  mensaje.value = 'Imagen cargada. Ahora recorta el comprobante antes de procesarlo.'
 
-  // Permite volver a seleccionar la misma foto si quieres probar de nuevo
   event.target.value = ''
 }
+function confirmarRecorte() {
+  const result = cropperRef.value?.getResult()
+
+  if (!result || !result.canvas) {
+    mensaje.value = 'No se pudo obtener el recorte. Intenta nuevamente.'
+    return
+  }
+
+  result.canvas.toBlob(
+    (blob) => {
+      if (!blob) {
+        mensaje.value = 'No se pudo generar la imagen recortada.'
+        return
+      }
+
+      const archivoRecortado = new File(
+        [blob],
+        'comprobante-recortado.jpg',
+        { type: 'image/jpeg' }
+      )
+
+      imagenFile.value = archivoRecortado
+
+      if (imagenPreview.value) {
+        URL.revokeObjectURL(imagenPreview.value)
+      }
+
+      imagenPreview.value = URL.createObjectURL(archivoRecortado)
+
+      mostrarEditorRecorte.value = false
+      datosProcesados.value = false
+      textoOCR.value = ''
+      progresoOCR.value = 0
+
+      limpiarFormulario()
+
+      mensaje.value = 'Recorte aplicado. Ahora presiona Procesar.'
+    },
+    'image/jpeg',
+    0.95
+  )
+}
+
+function cancelarRecorte() {
+  mostrarEditorRecorte.value = false
+  imagenOriginalPreview.value = ''
+  imagenFile.value = null
+  imagenPreview.value = ''
+  mensaje.value = 'Recorte cancelado. Toma otra foto.'
+}
+
+
 
 async function procesarImagen() {
   if (!imagenFile.value) {
@@ -733,5 +838,53 @@ pre {
   background: #ecfdf5;
   color: #065f46;
   font-size: 14px;
+}
+
+
+.crop-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(17, 24, 39, 0.92);
+  z-index: 9999;
+  padding: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.crop-card {
+  width: 100%;
+  max-width: 560px;
+  background: white;
+  border-radius: 18px;
+  padding: 18px;
+}
+
+.crop-card h2 {
+  margin-top: 0;
+}
+
+.crop-help {
+  font-size: 14px;
+  color: #6b7280;
+  line-height: 1.4;
+}
+
+.cropper {
+  width: 100%;
+  height: 430px;
+  background: #111827;
+  border-radius: 14px;
+  overflow: hidden;
+}
+
+.crop-buttons {
+  display: flex;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.cancel {
+  background: #6b7280;
 }
 </style>
