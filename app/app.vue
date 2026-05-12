@@ -303,7 +303,8 @@ async function procesarImagen() {
 
     await worker.setParameters({
       tessedit_pageseg_mode: '6',
-      preserve_interword_spaces: '1'
+      preserve_interword_spaces: '1',
+      user_defined_dpi: '300'
     })
 
     mensaje.value = 'Procesando imagen con OCR...'
@@ -360,9 +361,12 @@ function preprocesarImagen(file) {
         const canvas = document.createElement('canvas')
         const ctx = canvas.getContext('2d')
 
-        // No usar tamaño gigante porque en celular puede fallar
-        const maxAncho = 1200
-        const escala = img.width > maxAncho ? maxAncho / img.width : 1
+        const anchoObjetivo = 2200
+        let escala = anchoObjetivo / img.width
+
+        if (escala > 3) {
+          escala = 3
+        }
 
         canvas.width = Math.round(img.width * escala)
         canvas.height = Math.round(img.height * escala)
@@ -372,22 +376,42 @@ function preprocesarImagen(file) {
         const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
         const data = imageData.data
 
+        let suma = 0
+        let cantidad = 0
+
+        // Primero calculamos brillo promedio
         for (let i = 0; i < data.length; i += 4) {
           const r = data[i]
           const g = data[i + 1]
           const b = data[i + 2]
 
-          // Escala de grises, pero sin blanco/negro agresivo
+          const gris = 0.299 * r + 0.587 * g + 0.114 * b
+
+          suma += gris
+          cantidad++
+        }
+
+        const promedio = suma / cantidad
+
+        // Umbral dinámico según la foto
+        const umbral = promedio > 160 ? promedio - 25 : promedio
+
+        for (let i = 0; i < data.length; i += 4) {
+          const r = data[i]
+          const g = data[i + 1]
+          const b = data[i + 2]
+
           let gris = 0.299 * r + 0.587 * g + 0.114 * b
 
           // Contraste suave
-          gris = gris > 128
-            ? Math.min(255, gris * 1.15)
-            : Math.max(0, gris * 0.85)
+          gris = gris < umbral ? gris * 0.65 : gris * 1.25
 
-          data[i] = gris
-          data[i + 1] = gris
-          data[i + 2] = gris
+          // Blanco y negro
+          const valor = gris > umbral ? 255 : 0
+
+          data[i] = valor
+          data[i + 1] = valor
+          data[i + 2] = valor
         }
 
         ctx.putImageData(imageData, 0, 0)
@@ -395,14 +419,14 @@ function preprocesarImagen(file) {
         canvas.toBlob(
           (blob) => {
             if (!blob) {
-              reject(new Error('No se pudo convertir la imagen para OCR'))
+              reject(new Error('No se pudo generar imagen procesada'))
               return
             }
 
             resolve(blob)
           },
-          'image/jpeg',
-          0.9
+          'image/png',
+          1
         )
       } catch (error) {
         reject(error)
@@ -410,11 +434,11 @@ function preprocesarImagen(file) {
     }
 
     img.onerror = () => {
-      reject(new Error('No se pudo cargar la imagen en el navegador'))
+      reject(new Error('No se pudo cargar la imagen'))
     }
 
     reader.onerror = () => {
-      reject(new Error('No se pudo leer el archivo seleccionado'))
+      reject(new Error('No se pudo leer el archivo'))
     }
 
     reader.readAsDataURL(file)
