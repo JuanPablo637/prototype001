@@ -276,6 +276,174 @@ function cancelarRecorte() {
 }
 
 
+function generarVersionesOCR(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    const img = new Image()
+
+    reader.onload = () => {
+      img.src = reader.result
+    }
+
+    img.onload = () => {
+      try {
+        const versiones = []
+
+        const anchoObjetivo = 2400
+        let escala = anchoObjetivo / img.width
+
+        if (escala > 4) escala = 4
+        if (escala < 1) escala = 1
+
+        const width = Math.round(img.width * escala)
+        const height = Math.round(img.height * escala)
+
+        const crearCanvasBase = () => {
+          const canvas = document.createElement('canvas')
+          const ctx = canvas.getContext('2d')
+
+          canvas.width = width
+          canvas.height = height
+
+          ctx.imageSmoothingEnabled = true
+          ctx.imageSmoothingQuality = 'high'
+          ctx.drawImage(img, 0, 0, width, height)
+
+          return { canvas, ctx }
+        }
+
+        const crearBlob = (canvas, nombre) => {
+          return new Promise((res, rej) => {
+            canvas.toBlob(
+              (blob) => {
+                if (!blob) {
+                  rej(new Error('No se pudo generar blob'))
+                  return
+                }
+
+                res({
+                  nombre,
+                  blob
+                })
+              },
+              'image/png',
+              1
+            )
+          })
+        }
+
+        async function procesar() {
+          // VERSIÓN 1: gris + contraste suave
+          {
+            const { canvas, ctx } = crearCanvasBase()
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+            const data = imageData.data
+
+            for (let i = 0; i < data.length; i += 4) {
+              const r = data[i]
+              const g = data[i + 1]
+              const b = data[i + 2]
+
+              let gris = 0.299 * r + 0.587 * g + 0.114 * b
+
+              // Contraste suave, bueno para tickets grises como Tottus
+              gris = (gris - 128) * 1.7 + 128
+              gris = Math.max(0, Math.min(255, gris))
+
+              data[i] = gris
+              data[i + 1] = gris
+              data[i + 2] = gris
+            }
+
+            ctx.putImageData(imageData, 0, 0)
+            versiones.push(await crearBlob(canvas, 'gris_contraste'))
+          }
+
+          // VERSIÓN 2: blanco y negro suave
+          {
+            const { canvas, ctx } = crearCanvasBase()
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+            const data = imageData.data
+
+            let suma = 0
+            let total = 0
+
+            for (let i = 0; i < data.length; i += 4) {
+              const gris = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]
+              suma += gris
+              total++
+            }
+
+            const promedio = suma / total
+            const umbral = promedio - 15
+
+            for (let i = 0; i < data.length; i += 4) {
+              const r = data[i]
+              const g = data[i + 1]
+              const b = data[i + 2]
+
+              let gris = 0.299 * r + 0.587 * g + 0.114 * b
+
+              const valor = gris > umbral ? 255 : 0
+
+              data[i] = valor
+              data[i + 1] = valor
+              data[i + 2] = valor
+            }
+
+            ctx.putImageData(imageData, 0, 0)
+            versiones.push(await crearBlob(canvas, 'binario_suave'))
+          }
+
+          // VERSIÓN 3: blanco y negro más fuerte
+          {
+            const { canvas, ctx } = crearCanvasBase()
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+            const data = imageData.data
+
+            for (let i = 0; i < data.length; i += 4) {
+              const r = data[i]
+              const g = data[i + 1]
+              const b = data[i + 2]
+
+              let gris = 0.299 * r + 0.587 * g + 0.114 * b
+
+              gris = (gris - 128) * 2.2 + 128
+              gris = Math.max(0, Math.min(255, gris))
+
+              const valor = gris > 150 ? 255 : 0
+
+              data[i] = valor
+              data[i + 1] = valor
+              data[i + 2] = valor
+            }
+
+            ctx.putImageData(imageData, 0, 0)
+            versiones.push(await crearBlob(canvas, 'binario_fuerte'))
+          }
+
+          resolve(versiones)
+        }
+
+        procesar()
+
+      } catch (error) {
+        reject(error)
+      }
+    }
+
+    img.onerror = () => {
+      reject(new Error('No se pudo cargar la imagen'))
+    }
+
+    reader.onerror = () => {
+      reject(new Error('No se pudo leer la imagen'))
+    }
+
+    reader.readAsDataURL(file)
+  })
+}
+
 
 async function procesarImagen() {
   if (!imagenFile.value) {
@@ -293,7 +461,7 @@ async function procesarImagen() {
 
     const { createWorker } = await import('tesseract.js')
 
-    worker = await createWorker('spa', 1, {
+    worker = await createWorker('spa+eng', 1, {
       logger: (m) => {
         if (m.status === 'recognizing text') {
           progresoOCR.value = Math.round(m.progress * 100)
@@ -302,25 +470,37 @@ async function procesarImagen() {
     })
 
     await worker.setParameters({
-      tessedit_pageseg_mode: '6',
+      tessedit_pageseg_mode: '4',
       preserve_interword_spaces: '1',
       user_defined_dpi: '300'
     })
 
-    mensaje.value = 'Procesando imagen con OCR...'
+    mensaje.value = 'Generando versiones mejoradas de la imagen...'
 
-    let imagenParaOCR
+    const versiones = await generarVersionesOCR(imagenFile.value)
 
-    try {
-      imagenParaOCR = await preprocesarImagen(imagenFile.value)
-    } catch (errorPreproceso) {
-      console.warn('Falló el preprocesamiento. Se usará la imagen original:', errorPreproceso)
-      imagenParaOCR = imagenFile.value
+    let mejorResultado = null
+    let mejorTexto = ''
+    let mejorConfianza = -1
+
+    for (let i = 0; i < versiones.length; i++) {
+      mensaje.value = `Procesando versión ${i + 1} de ${versiones.length}...`
+
+      const result = await worker.recognize(versiones[i].blob)
+
+      const texto = result.data.text || ''
+      const confianza = result.data.confidence || 0
+
+      console.log('Versión OCR:', versiones[i].nombre, confianza, texto)
+
+      if (confianza > mejorConfianza && texto.trim().length > 10) {
+        mejorConfianza = confianza
+        mejorResultado = result
+        mejorTexto = texto
+      }
     }
 
-    const result = await worker.recognize(imagenParaOCR)
-
-    textoOCR.value = result.data.text || ''
+    textoOCR.value = mejorTexto
 
     const datos = extraerDatos(textoOCR.value)
 
@@ -333,10 +513,11 @@ async function procesarImagen() {
     form.total = datos.total
 
     datosProcesados.value = true
-    mensaje.value = 'OCR terminado. Revisa los campos antes de subir.'
+    mensaje.value = `OCR terminado. Confianza aproximada: ${Math.round(mejorConfianza)}%. Revisa antes de subir.`
+
   } catch (error) {
     console.error('Error OCR:', error)
-    mensaje.value = 'Error al procesar la imagen. Prueba con otra foto más clara o vuelve a cargarla.'
+    mensaje.value = 'Error al procesar la imagen. Prueba recortando mejor o tomando la foto más cerca.'
   } finally {
     if (worker) {
       await worker.terminate()
@@ -537,11 +718,13 @@ function extraerTotal(texto) {
   */
 
   const patrones = [
-    /total\s*a\s*pagar\s*s?\/?\s*([\d,.]+)/i,
-    /importe\s*total\s*s?\/?\s*([\d,.]+)/i,
-    /total\s*s?\/?\s*([\d,.]+)/i,
-    /monto\s*total\s*s?\/?\s*([\d,.]+)/i
-  ]
+  /importe\s*total\s*s?\/?\s*([\d,.]+)/i,
+  /total\s*del\s*valor\s*venta\s*s?\/?\s*([\d,.]+)/i,
+  /monto\s*total\s*tributos\s*s?\/?\s*([\d,.]+)/i,
+  /total\s*a\s*pagar\s*s?\/?\s*([\d,.]+)/i,
+  /total\s*neto\s*s?\/?\s*([\d,.]+)/i,
+  /total\s*s?\/?\s*([\d,.]+)/i
+]
 
   for (const patron of patrones) {
     const match = texto.match(patron)
