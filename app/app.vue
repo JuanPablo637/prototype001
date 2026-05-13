@@ -134,6 +134,12 @@
           Total
           <input v-model="form.total" placeholder="Ej: 150.00" />
         </label>
+
+        <label>
+          Moneda
+          <input v-model="form.moneda" placeholder="PEN / USD" />
+        </label>
+
       </section>
 
       <!-- TEXTO OCR -->
@@ -183,7 +189,8 @@ const form = reactive({
   serie: '',
   numero: '',
   fecha: '',
-  total: ''
+  total: '',
+  moneda: ''
 })
 
 function seleccionarImagen(event) {
@@ -601,6 +608,8 @@ async function procesarImagen() {
     form.numero = datos.numero
     form.fecha = datos.fecha
     form.total = datos.total
+    form.moneda = datos.moneda
+    
 
     datosProcesados.value = true
     mensaje.value = `OCR terminado. Confianza aproximada: ${Math.round(mejorConfianza)}%. Revisa antes de subir.`
@@ -718,6 +727,104 @@ function preprocesarImagen(file) {
 
 
 
+function extraerMoneda(textoOriginal) {
+  const lineas = obtenerLineas(textoOriginal)
+
+  const etiquetasTotal = [
+    /IMPORTE\s+TOTAL/,
+    /TOTAL\s+NETO/,
+    /TOTAL\s+A\s+PAGAR/,
+    /TOTAL\s+GENERAL/,
+    /TOTAL\s+VENTA/,
+    /TOTAL\s+DE\s+VENTA/,
+    /MONTO\s+TOTAL(?!\s+TRIBUTOS)/,
+    /TOTAL\s+COMPROBANTE/,
+    /CONTADO/,
+    /EFECTIVO/,
+    /TARJETA/,
+    /VISA/,
+    /MASTERCARD/
+  ]
+
+  // Primero busca moneda cerca de líneas de total o pago
+  for (let i = 0; i < lineas.length; i++) {
+    const linea = lineas[i]
+
+    if (etiquetasTotal.some(patron => patron.test(linea))) {
+      const bloque = [
+        lineas[i - 1] || '',
+        lineas[i] || '',
+        lineas[i + 1] || ''
+      ].join(' ')
+
+      const moneda = detectarMonedaEnTexto(bloque)
+
+      if (moneda) return moneda
+    }
+  }
+
+  // Si no encuentra cerca del total, busca en todo el texto
+  const texto = limpiarTextoPlano(textoOriginal)
+  const monedaGeneral = detectarMonedaEnTexto(texto)
+
+  if (monedaGeneral) return monedaGeneral
+
+  // En Perú, si no aparece símbolo, por defecto suele ser PEN
+  return 'PEN'
+}
+
+
+function detectarMonedaEnTexto(texto) {
+  const t = normalizarOCR(texto)
+
+  if (
+    /\bUSD\b/.test(t) ||
+    /\bUS\$/.test(t) ||
+    /\$/.test(t) ||
+    /\bDOLARES\b/.test(t) ||
+    /\bDOLAR\b/.test(t)
+  ) {
+    return 'USD'
+  }
+
+  if (
+    /\bPEN\b/.test(t) ||
+    /\bSOLES\b/.test(t) ||
+    /\bSOL\b/.test(t) ||
+    /\bS\/\b/.test(t)
+  ) {
+    return 'PEN'
+  }
+
+  return ''
+}
+
+
+function normalizarSimbolosMoneda(texto) {
+  return String(texto || '')
+    // Dólares
+    .replace(/\bU\s*S\s*\$\s*/gi, 'USD ')
+    .replace(/\bUS\s*\$\s*/gi, 'USD ')
+    .replace(/\bUSD\b/gi, 'USD')
+    .replace(/\bDOLARES\b/gi, 'USD')
+    .replace(/\bDÓLARES\b/gi, 'USD')
+    .replace(/\bDOLAR\b/gi, 'USD')
+    .replace(/\bDÓLAR\b/gi, 'USD')
+    .replace(/\$\s*(?=\d)/g, 'USD ')
+
+    // Soles
+    .replace(/\bPEN\b/gi, 'PEN')
+    .replace(/\bSOLES\b/gi, 'PEN')
+    .replace(/\bSOL\b/gi, 'PEN')
+    .replace(/\bS\s*\/\s*\.?\s*(?=\d)/gi, 'PEN ')
+    .replace(/\bS\s*[I1l|]\s*(?=\d)/gi, 'PEN ')
+    .replace(/\b5\s*\/\s*(?=\d)/gi, 'PEN ')
+    .replace(/\bS\s+(?=\d{1,6}[.,]\d{2})/gi, 'PEN ')
+}
+
+
+
+
 
 
 function extraerDatos(textoOriginal) {
@@ -730,7 +837,8 @@ function extraerDatos(textoOriginal) {
     serie: documento.serie,
     numero: documento.numero,
     fecha: extraerFecha(textoOriginal),
-    total: extraerTotal(textoOriginal)
+    total: extraerTotal(textoOriginal),
+    moneda: extraerMoneda(textoOriginal)
   }
 }
 
@@ -1150,9 +1258,9 @@ function identificarTipoDocumento(textoOriginal, serie = '') {
 
 
 function extraerMontosDeLinea(linea) {
-  const texto = String(linea || '')
+  const texto = normalizarSimbolosMoneda(String(linea || ''))
 
-  const regex = /(?:S\/|S\.|PEN)?\s*(\d{1,3}(?:[.,]\d{3})*[.,]\d{2}|\d{1,6}[.,]\d{2})/gi
+  const regex = /(?:PEN|USD)?\s*(\d{1,3}(?:[.,]\d{3})*[.,]\d{2}|\d{1,6}[.,]\d{2})/gi
 
   const montos = []
   let match
@@ -1164,15 +1272,12 @@ function extraerMontosDeLinea(linea) {
   return montos
 }
 
-function convertirMontoANumero(monto) {
-  const limpio = limpiarMonto(monto)
-  const numero = Number(limpio)
-
-  return Number.isFinite(numero) ? numero : 0
-}
-
 function limpiarMonto(monto) {
-  let m = String(monto || '')
+  let m = normalizarSimbolosMoneda(String(monto || ''))
+    .replace(/\bPEN\b/gi, '')
+    .replace(/\bUSD\b/gi, '')
+    .replace(/S\//gi, '')
+    .replace(/\$/g, '')
     .replace(/[^\d.,]/g, '')
     .trim()
 
@@ -1227,6 +1332,7 @@ async function subirDatos() {
       numero: form.numero,
       fecha: form.fecha,
       total: form.total,
+      moneda: form.moneda,
       estado: 'Procesado',
       textoOCR: textoOCR.value
     }
@@ -1259,6 +1365,7 @@ function limpiarFormulario() {
   form.numero = ''
   form.fecha = ''
   form.total = ''
+  form.moneda = ''
 }
 </script>
 
