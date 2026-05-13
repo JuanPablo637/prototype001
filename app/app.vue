@@ -422,6 +422,96 @@ function generarVersionesOCR(file) {
             versiones.push(await crearBlob(canvas, 'binario_fuerte'))
           }
 
+
+          // VERSIÓN 4: binario suave + dilatación
+          {
+            const { canvas, ctx } = crearCanvasBase()
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+            const data = imageData.data
+
+            let suma = 0
+            let total = 0
+
+            for (let i = 0; i < data.length; i += 4) {
+              const gris = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]
+              suma += gris
+              total++
+            }
+
+            const promedio = suma / total
+            const umbral = promedio - 15
+
+            for (let i = 0; i < data.length; i += 4) {
+              const r = data[i]
+              const g = data[i + 1]
+              const b = data[i + 2]
+
+              const gris = 0.299 * r + 0.587 * g + 0.114 * b
+              const valor = gris > umbral ? 255 : 0
+
+              data[i] = valor
+              data[i + 1] = valor
+              data[i + 2] = valor
+              data[i + 3] = 255
+            }
+
+            let binaria = new ImageData(
+              new Uint8ClampedArray(imageData.data),
+              imageData.width,
+              imageData.height
+            )
+
+            binaria = dilatarImageData(binaria, 1)
+
+            ctx.putImageData(binaria, 0, 0)
+            versiones.push(await crearBlob(canvas, 'binario_dilatado'))
+          }
+          
+
+
+          // VERSIÓN 5: binario suave + cierre morfológico
+          {
+            const { canvas, ctx } = crearCanvasBase()
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+            const data = imageData.data
+
+            let suma = 0
+            let total = 0
+
+            for (let i = 0; i < data.length; i += 4) {
+              const gris = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]
+              suma += gris
+              total++
+            }
+
+            const promedio = suma / total
+            const umbral = promedio - 15
+
+            for (let i = 0; i < data.length; i += 4) {
+              const r = data[i]
+              const g = data[i + 1]
+              const b = data[i + 2]
+
+              const gris = 0.299 * r + 0.587 * g + 0.114 * b
+              const valor = gris > umbral ? 255 : 0
+
+              data[i] = valor
+              data[i + 1] = valor
+              data[i + 2] = valor
+              data[i + 3] = 255
+            }
+
+            let binaria = new ImageData(
+              new Uint8ClampedArray(imageData.data),
+              imageData.width,
+              imageData.height
+            )
+
+            binaria = closingImageData(binaria, 1)
+
+            ctx.putImageData(binaria, 0, 0)
+            versiones.push(await crearBlob(canvas, 'binario_closing'))
+          }
           resolve(versiones)
         }
 
@@ -631,24 +721,68 @@ function preprocesarImagen(file) {
 
 
 function extraerDatos(textoOriginal) {
-  const texto = limpiarTexto(textoOriginal)
-
-  const ruc = extraerRUC(texto)
-  const documento = extraerDocumento(texto)
-  const fecha = extraerFecha(texto)
-  const total = extraerTotal(texto)
-  const proveedor = extraerProveedor(texto)
-  const tipoDocumento = identificarTipoDocumento(texto, documento.serie)
+  const documento = extraerDocumento(textoOriginal)
 
   return {
-    tipoDocumento,
-    ruc,
-    proveedor,
+    tipoDocumento: identificarTipoDocumento(textoOriginal, documento.serie),
+    ruc: extraerRUCProveedor(textoOriginal),
+    proveedor: extraerProveedor(textoOriginal),
     serie: documento.serie,
     numero: documento.numero,
-    fecha,
-    total
+    fecha: extraerFecha(textoOriginal),
+    total: extraerTotal(textoOriginal)
   }
+}
+
+
+
+function normalizarOCR(texto) {
+  return String(texto || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase()
+    .replace(/[|]/g, ' ')
+    .replace(/T0TAL/g, 'TOTAL')
+    .replace(/IMP0RTE/g, 'IMPORTE')
+    .replace(/B0LETA/g, 'BOLETA')
+    .replace(/FACTVRA/g, 'FACTURA')
+    .replace(/R\.?\s*U\.?\s*C\.?/g, 'RUC')
+    .replace(/S\s*\/\s*/g, 'S/ ')
+}
+
+
+
+
+function extraerRUCProveedor(textoOriginal) {
+  const lineas = obtenerLineas(textoOriginal)
+
+  const indiceDocumento = lineas.findIndex(linea =>
+    /FACTURA|BOLETA|GUIA|GUIA DE REMISION|NOTA DE CREDITO|NOTA DE DEBITO/.test(linea)
+  )
+
+  const zonaEmisor = indiceDocumento > 0
+    ? lineas.slice(0, indiceDocumento).join(' ')
+    : lineas.slice(0, 12).join(' ')
+
+  const rucEmisor = zonaEmisor.match(/\b(10|20)\d{9}\b/)
+
+  if (rucEmisor) return rucEmisor[0]
+
+  const rucGeneral = limpiarTextoPlano(textoOriginal).match(/\b(10|20)\d{9}\b/)
+
+  return rucGeneral ? rucGeneral[0] : ''
+}
+
+function obtenerLineas(texto) {
+  return normalizarOCR(texto)
+    .replace(/\r/g, '\n')
+    .split(/\n+/)
+    .map(linea => linea.replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+}
+
+function limpiarTextoPlano(texto) {
+  return obtenerLineas(texto).join(' ')
 }
 
 function limpiarTexto(texto) {
@@ -664,41 +798,39 @@ function extraerRUC(texto) {
   return match ? match[0] : ''
 }
 
-function extraerDocumento(texto) {
-  /*
-    Busca formatos comunes:
-    F001-000123
-    B001-000123
-    E001-000123
-    T001-000123
-    F001 000123
-  */
+function extraerDocumento(textoOriginal) {
+  const texto = limpiarTextoPlano(textoOriginal)
 
-  const match = texto.match(/\b([FBET]\d{3})[-\s]?(\d{4,10})\b/i)
+  const patrones = [
+    /(?:FACTURA|BOLETA|GUIA|NOTA)\s*(?:DE\s*VENTA)?\s*(?:ELECTRONICA)?\s*(?:NO\.?|NRO\.?)?\s*([FBT][A-Z0-9]{2,3})[-\s]*(\d{4,10})/i,
+    /\b([FBT][A-Z0-9]{2,3})[-\s]+(\d{4,10})\b/i,
+    /\b([FBT][A-Z0-9]{2,3})(\d{6,10})\b/i
+  ]
 
-  if (!match) {
-    return {
-      serie: '',
-      numero: ''
+  for (const patron of patrones) {
+    const match = texto.match(patron)
+
+    if (match) {
+      return {
+        serie: match[1].toUpperCase(),
+        numero: match[2]
+      }
     }
   }
 
   return {
-    serie: match[1].toUpperCase(),
-    numero: match[2]
+    serie: '',
+    numero: ''
   }
 }
 
-function extraerFecha(texto) {
-  /*
-    Busca fechas:
-    09/05/2026
-    09-05-2026
-    2026-05-09
-  */
+function extraerFecha(textoOriginal) {
+  const texto = limpiarTextoPlano(textoOriginal)
 
   const fechaNormal = texto.match(/\b\d{2}[\/\-]\d{2}[\/\-]\d{4}\b/)
-  if (fechaNormal) return fechaNormal[0].replaceAll('-', '/')
+  if (fechaNormal) {
+    return fechaNormal[0].replaceAll('-', '/')
+  }
 
   const fechaInvertida = texto.match(/\b\d{4}[\/\-]\d{2}[\/\-]\d{2}\b/)
   if (fechaInvertida) {
@@ -709,90 +841,374 @@ function extraerFecha(texto) {
   return ''
 }
 
-function extraerTotal(texto) {
-  /*
-    Busca montos cerca de palabras como:
-    TOTAL
-    IMPORTE TOTAL
-    TOTAL A PAGAR
-  */
 
-  const patrones = [
-  /importe\s*total\s*s?\/?\s*([\d,.]+)/i,
-  /total\s*del\s*valor\s*venta\s*s?\/?\s*([\d,.]+)/i,
-  /monto\s*total\s*tributos\s*s?\/?\s*([\d,.]+)/i,
-  /total\s*a\s*pagar\s*s?\/?\s*([\d,.]+)/i,
-  /total\s*neto\s*s?\/?\s*([\d,.]+)/i,
-  /total\s*s?\/?\s*([\d,.]+)/i
-]
 
-  for (const patron of patrones) {
-    const match = texto.match(patron)
-    if (match) {
-      return limpiarMonto(match[1])
+function clonarImageData(imageData) {
+  return new ImageData(
+    new Uint8ClampedArray(imageData.data),
+    imageData.width,
+    imageData.height
+  )
+}
+
+function dilatarImageData(imageData, iteraciones = 1) {
+  let actual = clonarImageData(imageData)
+
+  for (let it = 0; it < iteraciones; it++) {
+    const origen = actual.data
+    const salida = new Uint8ClampedArray(origen)
+    const width = actual.width
+    const height = actual.height
+
+    for (let y = 1; y < height - 1; y++) {
+      for (let x = 1; x < width - 1; x++) {
+        let negroEncontrado = false
+
+        for (let ky = -1; ky <= 1; ky++) {
+          for (let kx = -1; kx <= 1; kx++) {
+            const idx = ((y + ky) * width + (x + kx)) * 4
+            const valor = origen[idx] // R, porque ya está en binario
+
+            if (valor === 0) {
+              negroEncontrado = true
+              break
+            }
+          }
+          if (negroEncontrado) break
+        }
+
+        const i = (y * width + x) * 4
+        const nuevoValor = negroEncontrado ? 0 : 255
+
+        salida[i] = nuevoValor
+        salida[i + 1] = nuevoValor
+        salida[i + 2] = nuevoValor
+        salida[i + 3] = 255
+      }
+    }
+
+    actual = new ImageData(salida, actual.width, actual.height)
+  }
+
+  return actual
+}
+
+function erosionarImageData(imageData, iteraciones = 1) {
+  let actual = clonarImageData(imageData)
+
+  for (let it = 0; it < iteraciones; it++) {
+    const origen = actual.data
+    const salida = new Uint8ClampedArray(origen)
+    const width = actual.width
+    const height = actual.height
+
+    for (let y = 1; y < height - 1; y++) {
+      for (let x = 1; x < width - 1; x++) {
+        let todosNegros = true
+
+        for (let ky = -1; ky <= 1; ky++) {
+          for (let kx = -1; kx <= 1; kx++) {
+            const idx = ((y + ky) * width + (x + kx)) * 4
+            const valor = origen[idx]
+
+            if (valor !== 0) {
+              todosNegros = false
+              break
+            }
+          }
+          if (!todosNegros) break
+        }
+
+        const i = (y * width + x) * 4
+        const nuevoValor = todosNegros ? 0 : 255
+
+        salida[i] = nuevoValor
+        salida[i + 1] = nuevoValor
+        salida[i + 2] = nuevoValor
+        salida[i + 3] = 255
+      }
+    }
+
+    actual = new ImageData(salida, actual.width, actual.height)
+  }
+
+  return actual
+}
+
+function closingImageData(imageData, iteraciones = 1) {
+  const dilatada = dilatarImageData(imageData, iteraciones)
+  return erosionarImageData(dilatada, iteraciones)
+}
+
+function extraerTotal(textoOriginal) {
+  const lineas = obtenerLineas(textoOriginal)
+
+  const etiquetasFinales = [
+    /IMPORTE\s+TOTAL/,
+    /TOTAL\s+NETO/,
+    /TOTAL\s+A\s+PAGAR/,
+    /TOTAL\s+GENERAL/,
+    /TOTAL\s+VENTA/,
+    /TOTAL\s+DE\s+VENTA/,
+    /MONTO\s+TOTAL(?!\s+TRIBUTOS)/,
+    /TOTAL\s+COMPROBANTE/
+  ]
+
+  const etiquetasExcluir = [
+    /SUB\s*TOTAL/,
+    /SUBTOTAL/,
+    /OP\.?\s*GRAVADA/,
+    /OPERACION\s+GRAVADA/,
+    /IGV/,
+    /I\.G\.V/,
+    /ISC/,
+    /TOTAL\s+BRUTO/,
+    /TOTAL\s+DEL\s+VALOR\s+VENTA/,
+    /MONTO\s+TOTAL\s+TRIBUTOS/,
+    /DESCUENTO/,
+    /DSCTO/,
+    /VUELTO/,
+    /CAMBIO/
+  ]
+
+  function esEtiquetaFinal(linea) {
+    return etiquetasFinales.some(patron => patron.test(linea))
+  }
+
+  function esEtiquetaExcluida(linea) {
+    return etiquetasExcluir.some(patron => patron.test(linea))
+  }
+
+  // 1. Buscar líneas claras de total final
+  for (let i = 0; i < lineas.length; i++) {
+    const linea = lineas[i]
+
+    if (esEtiquetaFinal(linea) && !esEtiquetaExcluida(linea)) {
+      const montosLinea = extraerMontosDeLinea(linea)
+
+      if (montosLinea.length > 0) {
+        return limpiarMonto(montosLinea[montosLinea.length - 1])
+      }
+
+      // Si el monto está en la siguiente línea
+      for (let j = 1; j <= 3; j++) {
+        const siguiente = lineas[i + j]
+
+        if (!siguiente) continue
+
+        const montosSiguiente = extraerMontosDeLinea(siguiente)
+
+        if (montosSiguiente.length > 0) {
+          return limpiarMonto(montosSiguiente[montosSiguiente.length - 1])
+        }
+      }
     }
   }
 
-  /*
-    Si no encuentra palabra TOTAL, toma el monto más grande detectado.
-  */
+  // 2. Buscar líneas de forma de pago como respaldo
+  const etiquetasPago = [
+    /CONTADO/,
+    /EFECTIVO/,
+    /TARJETA/,
+    /VISA/,
+    /MASTERCARD/,
+    /CREDITO/,
+    /DEBITO/
+  ]
 
-  const montos = texto.match(/\b\d{1,5}[,.]\d{2}\b/g)
+  for (let i = 0; i < lineas.length; i++) {
+    const linea = lineas[i]
 
-  if (!montos || montos.length === 0) return ''
+    if (etiquetasPago.some(patron => patron.test(linea))) {
+      const montosLinea = extraerMontosDeLinea(linea)
 
-  const montosNumericos = montos.map((m) => ({
-    original: m,
-    valor: Number(m.replace(',', '.'))
-  }))
+      if (montosLinea.length > 0) {
+        return limpiarMonto(montosLinea[montosLinea.length - 1])
+      }
 
-  montosNumericos.sort((a, b) => b.valor - a.valor)
+      const siguiente = lineas[i + 1]
 
-  return limpiarMonto(montosNumericos[0].original)
+      if (siguiente) {
+        const montosSiguiente = extraerMontosDeLinea(siguiente)
+
+        if (montosSiguiente.length > 0) {
+          return limpiarMonto(montosSiguiente[montosSiguiente.length - 1])
+        }
+      }
+    }
+  }
+
+  // 3. Último respaldo: tomar el monto más grande
+  const todosLosMontos = []
+
+  for (const linea of lineas) {
+    if (esEtiquetaExcluida(linea)) continue
+
+    const montos = extraerMontosDeLinea(linea)
+
+    for (const monto of montos) {
+      const valor = convertirMontoANumero(monto)
+
+      if (valor > 0 && valor < 100000) {
+        todosLosMontos.push({
+          original: monto,
+          valor
+        })
+      }
+    }
+  }
+
+  if (todosLosMontos.length === 0) return ''
+
+  todosLosMontos.sort((a, b) => b.valor - a.valor)
+
+  return limpiarMonto(todosLosMontos[0].original)
 }
 
-function limpiarMonto(monto) {
-  return monto
-    .replace(',', '.')
-    .replace(/[^\d.]/g, '')
-}
+function extraerProveedor(textoOriginal) {
+  const lineas = obtenerLineas(textoOriginal)
 
-function extraerProveedor(texto) {
-  /*
-    Versión simple:
-    intenta tomar el texto antes del RUC.
-    Luego lo mejoraremos con reglas más finas.
-  */
+  const indiceDocumento = lineas.findIndex(linea =>
+    /FACTURA|BOLETA|GUIA|GUIA DE REMISION|NOTA DE CREDITO|NOTA DE DEBITO/.test(linea)
+  )
 
-  const rucIndex = texto.search(/\b(10|20)\d{9}\b/)
+  const limite = indiceDocumento > 0 ? indiceDocumento : Math.min(10, lineas.length)
+  const encabezado = lineas.slice(0, limite)
 
-  if (rucIndex > 0) {
-    const antesDelRuc = texto.substring(0, rucIndex).trim()
-    const palabras = antesDelRuc.split(' ')
+  const palabrasDireccion = /AV\.?|JR\.?|JIRON|CAL\.?|CALLE|URB\.?|INT\.?|PISO|LIMA|LOCAL|TERMINAL|CAJERO|DIRECCION|DIR\.?|TELEF|TELF|RUC/
 
-    return palabras.slice(0, 8).join(' ')
+  const limpiarNombre = (linea) => {
+    return linea
+      .replace(/\b(10|20)\d{9}\b/g, '')
+      .replace(/RUC\s*:?\s*/g, '')
+      .replace(/[-–—]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+  }
+
+  // Primero busca razón social formal
+  for (const linea of encabezado) {
+    const limpia = limpiarNombre(linea)
+
+    if (
+      limpia.length >= 4 &&
+      /(S\.?\s*A\.?\s*C\.?|S\.?\s*A\.?|SAC|SA|E\.?\s*I\.?\s*R\.?\s*L\.?|EIRL|S\.?\s*R\.?\s*L\.?|SRL)/.test(limpia)
+    ) {
+      return limpia
+    }
+  }
+
+  // Luego busca una línea comercial útil
+  for (const linea of encabezado) {
+    const limpia = limpiarNombre(linea)
+
+    if (
+      limpia.length >= 4 &&
+      !palabrasDireccion.test(limpia) &&
+      !/^\d+$/.test(limpia)
+    ) {
+      return limpia
+    }
   }
 
   return ''
 }
 
-function identificarTipoDocumento(texto, serie) {
-  const textoMayus = texto.toUpperCase()
+function identificarTipoDocumento(textoOriginal, serie = '') {
+  const texto = limpiarTextoPlano(textoOriginal)
+  const serieMayus = String(serie || '').toUpperCase()
 
-  if (textoMayus.includes('FACTURA') || serie.startsWith('F')) {
+  if (/NOTA\s+DE\s+CREDITO/.test(texto)) {
+    return 'Nota de crédito'
+  }
+
+  if (/NOTA\s+DE\s+DEBITO/.test(texto)) {
+    return 'Nota de débito'
+  }
+
+  if (/GUIA\s+DE\s+REMISION|GUIA/.test(texto) || serieMayus.startsWith('T')) {
+    return 'Guía'
+  }
+
+  if (/FACTURA|FACTURA\s+DE\s+VENTA|FACTURA\s+ELECTRONICA/.test(texto) || serieMayus.startsWith('F')) {
     return 'Factura'
   }
 
-  if (textoMayus.includes('BOLETA') || serie.startsWith('B')) {
+  if (/BOLETA|BOLETA\s+DE\s+VENTA|BOLETA\s+ELECTRONICA/.test(texto) || serieMayus.startsWith('B')) {
     return 'Boleta'
   }
 
-  if (textoMayus.includes('GUIA') || textoMayus.includes('GUÍA') || serie.startsWith('T')) {
-    return 'Guía'
+  if (/TICKET|RECIBO/.test(texto)) {
+    return 'Ticket / Recibo'
   }
 
   return 'Otro'
 }
+
+
+
+
+
+function extraerMontosDeLinea(linea) {
+  const texto = String(linea || '')
+
+  const regex = /(?:S\/|S\.|PEN)?\s*(\d{1,3}(?:[.,]\d{3})*[.,]\d{2}|\d{1,6}[.,]\d{2})/gi
+
+  const montos = []
+  let match
+
+  while ((match = regex.exec(texto)) !== null) {
+    montos.push(match[1])
+  }
+
+  return montos
+}
+
+function convertirMontoANumero(monto) {
+  const limpio = limpiarMonto(monto)
+  const numero = Number(limpio)
+
+  return Number.isFinite(numero) ? numero : 0
+}
+
+function limpiarMonto(monto) {
+  let m = String(monto || '')
+    .replace(/[^\d.,]/g, '')
+    .trim()
+
+  if (!m) return ''
+
+  const tieneComa = m.includes(',')
+  const tienePunto = m.includes('.')
+
+  if (tieneComa && tienePunto) {
+    if (m.lastIndexOf(',') > m.lastIndexOf('.')) {
+      m = m.replace(/\./g, '').replace(',', '.')
+    } else {
+      m = m.replace(/,/g, '')
+    }
+  } else if (tieneComa) {
+    m = m.replace(',', '.')
+  }
+
+  const numero = Number(m)
+
+  if (!Number.isFinite(numero)) return ''
+
+  return numero.toFixed(2)
+}
+
+
+
+
+
+
+
+
+
+
+
+
 
 async function subirDatos() {
   if (!datosProcesados.value) {
