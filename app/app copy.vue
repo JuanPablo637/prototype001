@@ -845,7 +845,7 @@ function extraerDatos(textoOriginal) {
 
 
 function normalizarOCR(texto) {
-  return normalizarSimbolosMoneda(String(texto || ''))
+  return String(texto || '')
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .toUpperCase()
@@ -855,7 +855,7 @@ function normalizarOCR(texto) {
     .replace(/B0LETA/g, 'BOLETA')
     .replace(/FACTVRA/g, 'FACTURA')
     .replace(/R\.?\s*U\.?\s*C\.?/g, 'RUC')
-    .replace(/\s+/g, ' ')
+    .replace(/S\s*\/\s*/g, 'S/ ')
 }
 
 
@@ -1301,13 +1301,6 @@ function limpiarMonto(monto) {
   if (!Number.isFinite(numero)) return ''
 
   return numero.toFixed(2)
-}
-
-function convertirMontoANumero(monto) {
-  const limpio = limpiarMonto(monto)
-  const numero = Number(limpio)
-
-  return Number.isFinite(numero) ? numero : 0
 }
 
 
