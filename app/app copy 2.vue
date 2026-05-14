@@ -835,75 +835,13 @@ function normalizarSimbolosMoneda(texto) {
 
 
 
-
-const PROVEEDORES_CONOCIDOS = {
-  '20508565934': 'HIPERMERCADOS TOTTUS S.A.',
-  '20508655934': 'HIPERMERCADOS TOTTUS S.A.',
-  '20100111838': 'GRIFOS ESPINOZA S.A.'
-}
-
-function extraerProveedorPorRUC(ruc) {
-  return PROVEEDORES_CONOCIDOS[String(ruc || '').trim()] || ''
-}
-
-function extraerProveedor(textoOriginal) {
-  const lineas = obtenerLineas(textoOriginal)
-
-  const indiceDocumento = lineas.findIndex(linea =>
-    /FACTURA|BOLETA|GUIA|GUIA DE REMISION|NOTA DE CREDITO|NOTA DE DEBITO|TICKET|RECIBO/.test(linea)
-  )
-
-  const limite = indiceDocumento > 0 ? indiceDocumento : Math.min(12, lineas.length)
-  const encabezado = lineas.slice(0, limite)
-
-  const palabrasNoProveedor = /RUC|AUC|AV\.?|AU\.?|JR\.?|JIRON|CAL\.?|CALLE|URB\.?|INT\.?|PISO|LIMA|LOCAL|TERMINAL|CAJERO|DIRECCION|DIR\.?|TELEF|TELF|HORA|FECHA|BOLETA|FACTURA|GUIA|NRO|NUMERO/
-
-  const limpiarNombre = (linea) => {
-    return String(linea || '')
-      .replace(/\b(10|20)\d{9}\b/g, '')
-      .replace(/RUC\s*:?\s*/g, '')
-      .replace(/AUC\s*:?\s*/g, '')
-      .replace(/[-–—]+/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim()
-  }
-
-  for (const linea of encabezado) {
-    const limpia = limpiarNombre(linea)
-
-    if (
-      limpia.length >= 4 &&
-      /(S\.?\s*A\.?\s*C\.?|S\.?\s*A\.?|SAC|SA|E\.?\s*I\.?\s*R\.?\s*L\.?|EIRL|S\.?\s*R\.?\s*L\.?|SRL)/.test(limpia)
-    ) {
-      return limpia
-    }
-  }
-
-  for (const linea of encabezado) {
-    const limpia = limpiarNombre(linea)
-
-    if (
-      limpia.length >= 4 &&
-      !palabrasNoProveedor.test(limpia) &&
-      !/^\d+$/.test(limpia)
-    ) {
-      return limpia
-    }
-  }
-
-  return ''
-}
-
-
-
 function extraerDatos(textoOriginal) {
   const documento = extraerDocumento(textoOriginal)
-  const ruc = extraerRUCProveedor(textoOriginal)
 
   return {
     tipoDocumento: identificarTipoDocumento(textoOriginal, documento.serie),
-    ruc,
-    proveedor: extraerProveedorPorRUC(ruc) || extraerProveedor(textoOriginal),
+    ruc: extraerRUCProveedor(textoOriginal),
+    proveedor: extraerProveedor(textoOriginal),
     serie: documento.serie,
     numero: documento.numero,
     fecha: extraerFecha(textoOriginal),
@@ -1361,39 +1299,6 @@ function extraerMontosDeLinea(linea) {
   }
 
   return montos
-}
-
-function limpiarMonto(monto) {
-  let m = normalizarSimbolosMoneda(String(monto || ''))
-    .replace(/\b(\d{1,6})\s+(\d{2})\b/g, '$1.$2')
-    .replace(/\b(\d{1,6})-(\d{2})\b/g, '$1.$2')
-    .replace(/\bPEN\b/gi, '')
-    .replace(/\bUSD\b/gi, '')
-    .replace(/S\//gi, '')
-    .replace(/\$/g, '')
-    .replace(/[^\d.,]/g, '')
-    .trim()
-
-  if (!m) return ''
-
-  const tieneComa = m.includes(',')
-  const tienePunto = m.includes('.')
-
-  if (tieneComa && tienePunto) {
-    if (m.lastIndexOf(',') > m.lastIndexOf('.')) {
-      m = m.replace(/\./g, '').replace(',', '.')
-    } else {
-      m = m.replace(/,/g, '')
-    }
-  } else if (tieneComa) {
-    m = m.replace(',', '.')
-  }
-
-  const numero = Number(m)
-
-  if (!Number.isFinite(numero)) return ''
-
-  return numero.toFixed(2)
 }
 
 function convertirMontoANumero(monto) {
