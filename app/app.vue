@@ -780,7 +780,6 @@ function detectarMonedaEnTexto(texto) {
   if (
     /\bUSD\b/.test(t) ||
     /\bUS\$/.test(t) ||
-    /\$/.test(t) ||
     /\bDOLARES\b/.test(t) ||
     /\bDOLAR\b/.test(t)
   ) {
@@ -801,8 +800,29 @@ function detectarMonedaEnTexto(texto) {
 
 
 function normalizarSimbolosMoneda(texto) {
-  return String(texto || '')
-    // Dólares
+  let t = String(texto || '')
+
+  /*
+    IMPORTANTE:
+    En tickets peruanos el OCR muchas veces lee S/ como $/
+    Por eso $/15.90 o $ 15.90 lo tratamos como PEN, no como USD.
+    Para USD solo tomamos US$, USD, DOLARES.
+  */
+
+  // Soles mal leídos
+  t = t
+    .replace(/\$\s*\/\s*(?=\d)/g, 'PEN ')
+    .replace(/\$\s*(?=\d{1,6}(?:[.,]|\s)\d{2})/g, 'PEN ')
+    .replace(/\bS\s*\/\s*\.?\s*(?=\d)/gi, 'PEN ')
+    .replace(/\bS\s*[I1l|]\s*(?=\d)/gi, 'PEN ')
+    .replace(/\b5\s*\/\s*(?=\d)/gi, 'PEN ')
+    .replace(/\bS\s+(?=\d{1,6}[.,]\d{2})/gi, 'PEN ')
+    .replace(/\bSOLES\b/gi, 'PEN')
+    .replace(/\bSOL\b/gi, 'PEN')
+    .replace(/\bPEN\b/gi, 'PEN')
+
+  // Dólares reales
+  t = t
     .replace(/\bU\s*S\s*\$\s*/gi, 'USD ')
     .replace(/\bUS\s*\$\s*/gi, 'USD ')
     .replace(/\bUSD\b/gi, 'USD')
@@ -810,16 +830,8 @@ function normalizarSimbolosMoneda(texto) {
     .replace(/\bDÓLARES\b/gi, 'USD')
     .replace(/\bDOLAR\b/gi, 'USD')
     .replace(/\bDÓLAR\b/gi, 'USD')
-    .replace(/\$\s*(?=\d)/g, 'USD ')
 
-    // Soles
-    .replace(/\bPEN\b/gi, 'PEN')
-    .replace(/\bSOLES\b/gi, 'PEN')
-    .replace(/\bSOL\b/gi, 'PEN')
-    .replace(/\bS\s*\/\s*\.?\s*(?=\d)/gi, 'PEN ')
-    .replace(/\bS\s*[I1l|]\s*(?=\d)/gi, 'PEN ')
-    .replace(/\b5\s*\/\s*(?=\d)/gi, 'PEN ')
-    .replace(/\bS\s+(?=\d{1,6}[.,]\d{2})/gi, 'PEN ')
+  return t
 }
 
 
@@ -851,9 +863,15 @@ function normalizarOCR(texto) {
     .toUpperCase()
     .replace(/[|]/g, ' ')
     .replace(/T0TAL/g, 'TOTAL')
+    .replace(/T0T4L/g, 'TOTAL')
     .replace(/IMP0RTE/g, 'IMPORTE')
+    .replace(/INPORTE/g, 'IMPORTE')
+    .replace(/INP0RTE/g, 'IMPORTE')
+    .replace(/IMPCRTE/g, 'IMPORTE')
     .replace(/B0LETA/g, 'BOLETA')
+    .replace(/BOLFTA/g, 'BOLETA')
     .replace(/FACTVRA/g, 'FACTURA')
+    .replace(/FACTURA/g, 'FACTURA')
     .replace(/R\.?\s*U\.?\s*C\.?/g, 'RUC')
     .replace(/\s+/g, ' ')
 }
@@ -1053,13 +1071,15 @@ function extraerTotal(textoOriginal) {
 
   const etiquetasFinales = [
     /IMPORTE\s+TOTAL/,
-    /TOTAL\s+NETO/,
+    /IMPORTE\s+TOTAL\s+A\s+PAGAR/,
     /TOTAL\s+A\s+PAGAR/,
+    /TOTAL\s+NETO/,
     /TOTAL\s+GENERAL/,
     /TOTAL\s+VENTA/,
     /TOTAL\s+DE\s+VENTA/,
     /MONTO\s+TOTAL(?!\s+TRIBUTOS)/,
-    /TOTAL\s+COMPROBANTE/
+    /TOTAL\s+COMPROBANTE/,
+    /TOTAL\s+FINAL/
   ]
 
   const etiquetasExcluir = [
@@ -1076,7 +1096,10 @@ function extraerTotal(textoOriginal) {
     /DESCUENTO/,
     /DSCTO/,
     /VUELTO/,
-    /CAMBIO/
+    /CAMBIO/,
+    /VALOR\s+DESC/,
+    /CODIGO\s+DESCRIPCION/,
+    /CANT\s+X\s+PRECIO/
   ]
 
   function esEtiquetaFinal(linea) {
@@ -1087,33 +1110,36 @@ function extraerTotal(textoOriginal) {
     return etiquetasExcluir.some(patron => patron.test(linea))
   }
 
-  // 1. Buscar líneas claras de total final
+  // 1. Buscar total final por etiqueta
   for (let i = 0; i < lineas.length; i++) {
     const linea = lineas[i]
 
     if (esEtiquetaFinal(linea) && !esEtiquetaExcluida(linea)) {
-      const montosLinea = extraerMontosDeLinea(linea)
+      const bloque = [
+        lineas[i] || '',
+        lineas[i + 1] || '',
+        lineas[i + 2] || '',
+        lineas[i + 3] || '',
+        lineas[i + 4] || ''
+      ].join(' ')
 
-      if (montosLinea.length > 0) {
-        return limpiarMonto(montosLinea[montosLinea.length - 1])
-      }
+      const montosBloque = extraerMontosDeLinea(bloque)
 
-      // Si el monto está en la siguiente línea
-      for (let j = 1; j <= 3; j++) {
-        const siguiente = lineas[i + j]
-
-        if (!siguiente) continue
-
-        const montosSiguiente = extraerMontosDeLinea(siguiente)
-
-        if (montosSiguiente.length > 0) {
-          return limpiarMonto(montosSiguiente[montosSiguiente.length - 1])
-        }
+      if (montosBloque.length > 0) {
+        return limpiarMonto(montosBloque[montosBloque.length - 1])
       }
     }
   }
 
-  // 2. Buscar líneas de forma de pago como respaldo
+  // 2. Caso especial: busca PEN/USD cerca de importe total aunque OCR haya separado todo
+  const textoPlano = limpiarTextoPlano(textoOriginal)
+  const matchImporte = textoPlano.match(/IMPORTE\s+TOTAL.{0,80}?(?:PEN|USD)?\s*(\d{1,6}(?:[.,]|\s)\d{2})/i)
+
+  if (matchImporte && matchImporte[1]) {
+    return limpiarMonto(matchImporte[1])
+  }
+
+  // 3. Buscar líneas de pago como respaldo
   const etiquetasPago = [
     /CONTADO/,
     /EFECTIVO/,
@@ -1128,25 +1154,20 @@ function extraerTotal(textoOriginal) {
     const linea = lineas[i]
 
     if (etiquetasPago.some(patron => patron.test(linea))) {
-      const montosLinea = extraerMontosDeLinea(linea)
+      const bloque = [
+        lineas[i] || '',
+        lineas[i + 1] || ''
+      ].join(' ')
 
-      if (montosLinea.length > 0) {
-        return limpiarMonto(montosLinea[montosLinea.length - 1])
-      }
+      const montosBloque = extraerMontosDeLinea(bloque)
 
-      const siguiente = lineas[i + 1]
-
-      if (siguiente) {
-        const montosSiguiente = extraerMontosDeLinea(siguiente)
-
-        if (montosSiguiente.length > 0) {
-          return limpiarMonto(montosSiguiente[montosSiguiente.length - 1])
-        }
+      if (montosBloque.length > 0) {
+        return limpiarMonto(montosBloque[montosBloque.length - 1])
       }
     }
   }
 
-  // 3. Último respaldo: tomar el monto más grande
+  // 4. Último respaldo: tomar el monto más grande, evitando subtotales e impuestos
   const todosLosMontos = []
 
   for (const linea of lineas) {
@@ -1171,55 +1192,6 @@ function extraerTotal(textoOriginal) {
   todosLosMontos.sort((a, b) => b.valor - a.valor)
 
   return limpiarMonto(todosLosMontos[0].original)
-}
-
-function extraerProveedor(textoOriginal) {
-  const lineas = obtenerLineas(textoOriginal)
-
-  const indiceDocumento = lineas.findIndex(linea =>
-    /FACTURA|BOLETA|GUIA|GUIA DE REMISION|NOTA DE CREDITO|NOTA DE DEBITO/.test(linea)
-  )
-
-  const limite = indiceDocumento > 0 ? indiceDocumento : Math.min(10, lineas.length)
-  const encabezado = lineas.slice(0, limite)
-
-  const palabrasDireccion = /AV\.?|JR\.?|JIRON|CAL\.?|CALLE|URB\.?|INT\.?|PISO|LIMA|LOCAL|TERMINAL|CAJERO|DIRECCION|DIR\.?|TELEF|TELF|RUC/
-
-  const limpiarNombre = (linea) => {
-    return linea
-      .replace(/\b(10|20)\d{9}\b/g, '')
-      .replace(/RUC\s*:?\s*/g, '')
-      .replace(/[-–—]+/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim()
-  }
-
-  // Primero busca razón social formal
-  for (const linea of encabezado) {
-    const limpia = limpiarNombre(linea)
-
-    if (
-      limpia.length >= 4 &&
-      /(S\.?\s*A\.?\s*C\.?|S\.?\s*A\.?|SAC|SA|E\.?\s*I\.?\s*R\.?\s*L\.?|EIRL|S\.?\s*R\.?\s*L\.?|SRL)/.test(limpia)
-    ) {
-      return limpia
-    }
-  }
-
-  // Luego busca una línea comercial útil
-  for (const linea of encabezado) {
-    const limpia = limpiarNombre(linea)
-
-    if (
-      limpia.length >= 4 &&
-      !palabrasDireccion.test(limpia) &&
-      !/^\d+$/.test(limpia)
-    ) {
-      return limpia
-    }
-  }
-
-  return ''
 }
 
 function identificarTipoDocumento(textoOriginal, serie = '') {
@@ -1258,7 +1230,10 @@ function identificarTipoDocumento(textoOriginal, serie = '') {
 
 
 function extraerMontosDeLinea(linea) {
-  const texto = normalizarSimbolosMoneda(String(linea || ''))
+  let texto = normalizarSimbolosMoneda(String(linea || ''))
+
+  // Corrige montos que el OCR lee como "15 90"
+  texto = texto.replace(/\b(\d{1,6})\s+(\d{2})\b/g, '$1.$2')
 
   const regex = /(?:PEN|USD)?\s*(\d{1,3}(?:[.,]\d{3})*[.,]\d{2}|\d{1,6}[.,]\d{2})/gi
 
@@ -1274,6 +1249,7 @@ function extraerMontosDeLinea(linea) {
 
 function limpiarMonto(monto) {
   let m = normalizarSimbolosMoneda(String(monto || ''))
+    .replace(/\b(\d{1,6})\s+(\d{2})\b/g, '$1.$2')
     .replace(/\bPEN\b/gi, '')
     .replace(/\bUSD\b/gi, '')
     .replace(/S\//gi, '')
