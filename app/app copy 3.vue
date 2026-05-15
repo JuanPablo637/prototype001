@@ -781,9 +781,9 @@ async function procesarImagen() {
       ...versionesSecciones
     ]
 
+    let mejorResultado = null
     let mejorTexto = ''
     let mejorConfianza = -1
-    const textosDetectados = []
 
     for (let i = 0; i < versiones.length; i++) {
       mensaje.value = `Procesando versión ${i + 1} de ${versiones.length}...`
@@ -795,46 +795,14 @@ async function procesarImagen() {
 
       console.log('Versión OCR:', versiones[i].nombre, confianza, texto)
 
-      if (texto.trim().length > 8) {
-        textosDetectados.push({
-          nombre: versiones[i].nombre,
-          texto,
-          confianza
-        })
-      }
-
       if (confianza > mejorConfianza && texto.trim().length > 10) {
         mejorConfianza = confianza
+        mejorResultado = result
         mejorTexto = texto
       }
     }
 
-    const textosCabecera = textosDetectados
-      .filter(t =>
-        t.nombre.includes('cabecera') ||
-        t.nombre.includes('documento')
-      )
-      .map(t => `[${t.nombre}]\n${t.texto}`)
-      .join('\n\n')
-
-    const textosTotales = textosDetectados
-      .filter(t =>
-        t.nombre.includes('total') ||
-        t.nombre.includes('inferior')
-      )
-      .map(t => `[${t.nombre}]\n${t.texto}`)
-      .join('\n\n')
-
-    const textoCombinado = [
-      '[MEJOR_TEXTO]',
-      mejorTexto,
-      '[CABECERAS]',
-      textosCabecera,
-      '[TOTALES]',
-      textosTotales
-    ].join('\n\n')
-
-    textoOCR.value = textoCombinado
+    textoOCR.value = mejorTexto
 
     const datos = extraerDatos(textoOCR.value)
 
@@ -846,6 +814,7 @@ async function procesarImagen() {
     form.fecha = datos.fecha
     form.total = datos.total
     form.moneda = datos.moneda
+    
 
     datosProcesados.value = true
     mensaje.value = `OCR terminado. Confianza aproximada: ${Math.round(mejorConfianza)}%. Revisa antes de subir.`
@@ -1220,83 +1189,21 @@ function extraerRUC(texto) {
 }
 
 function extraerDocumento(textoOriginal) {
-  const lineas = obtenerLineas(textoOriginal)
-  const textoPlano = limpiarTextoPlano(textoOriginal)
+  const texto = limpiarTextoPlano(textoOriginal)
 
-  // 1. Primero buscar cerca de BOLETA / FACTURA / GUIA / NOTA
-  for (let i = 0; i < lineas.length; i++) {
-    const linea = lineas[i]
-
-    if (/BOLETA|FACTURA|GUIA|NOTA|TICKET|RECIBO/.test(linea)) {
-      const bloque = [
-        lineas[i - 1] || '',
-        lineas[i] || '',
-        lineas[i + 1] || '',
-        lineas[i + 2] || '',
-        lineas[i + 3] || ''
-      ].join(' ')
-
-      const doc = buscarSerieNumeroEnTexto(bloque)
-
-      if (doc.serie && doc.numero) return doc
-    }
-  }
-
-  // 2. Buscar en cabeceras procesadas por secciones
-  const matchCabecera = textoPlano.match(/\[CABECERAS\](.*?)(\[TOTALES\]|$)/i)
-
-  if (matchCabecera && matchCabecera[1]) {
-    const docCabecera = buscarSerieNumeroEnTexto(matchCabecera[1])
-
-    if (docCabecera.serie && docCabecera.numero) {
-      return docCabecera
-    }
-  }
-
-  // 3. Búsqueda general
-  const docGeneral = buscarSerieNumeroEnTexto(textoPlano)
-
-  if (docGeneral.serie && docGeneral.numero) {
-    return docGeneral
-  }
-
-  return {
-    serie: '',
-    numero: ''
-  }
-}
-
-function buscarSerieNumeroEnTexto(textoEntrada) {
-  let texto = normalizarOCR(textoEntrada)
-
-  texto = texto
-    .replace(/N\s*[°º]\s*/g, 'NO. ')
-    .replace(/\bNRO\b/g, 'NO. ')
-    .replace(/\bNUMERO\b/g, 'NO. ')
-    .replace(/\bNO\s*[:.-]?\s*/g, 'NO. ')
-    .replace(/[–—]/g, '-')
-    .replace(/\s*-\s*/g, '-')
-    .replace(/\s+/g, ' ')
-
-  const patronesConContexto = [
-    /(?:BOLETA|FACTURA|GUIA|NOTA|TICKET|RECIBO).*?(?:NO\.?|N\.?)?\s*([FBTE][A-Z0-9]{2,3})[-\s]*(\d{4,10})/i,
-    /(?:NO\.?|N\.?)\s*([FBTE][A-Z0-9]{2,3})[-\s]*(\d{4,10})/i,
-    /\b([FBTE][A-Z0-9]{2,3})[-\s]*(\d{6,10})\b/i,
-    /\b([FBTE][A-Z0-9]{2,3})(\d{6,10})\b/i
+  const patrones = [
+    /(?:FACTURA|BOLETA|GUIA|NOTA)\s*(?:DE\s*VENTA)?\s*(?:ELECTRONICA)?\s*(?:NO\.?|NRO\.?)?\s*([FBT][A-Z0-9]{2,3})[-\s]*(\d{4,10})/i,
+    /\b([FBT][A-Z0-9]{2,3})[-\s]+(\d{4,10})\b/i,
+    /\b([FBT][A-Z0-9]{2,3})(\d{6,10})\b/i
   ]
 
-  for (const patron of patronesConContexto) {
+  for (const patron of patrones) {
     const match = texto.match(patron)
 
     if (match) {
-      const serie = limpiarSerieOCR(match[1])
-      const numero = String(match[2] || '').replace(/\D/g, '')
-
-      if (serie && numero.length >= 4) {
-        return {
-          serie,
-          numero
-        }
+      return {
+        serie: match[1].toUpperCase(),
+        numero: match[2]
       }
     }
   }
@@ -1305,25 +1212,6 @@ function buscarSerieNumeroEnTexto(textoEntrada) {
     serie: '',
     numero: ''
   }
-}
-
-function limpiarSerieOCR(serie) {
-  let s = String(serie || '')
-    .toUpperCase()
-    .replace(/[^A-Z0-9]/g, '')
-
-  if (!s) return ''
-
-  // Correcciones suaves de OCR, sin amarrarlo a un proveedor específico
-  s = s
-    .replace(/^8/, 'B')
-
-  // La serie normalmente tiene 4 caracteres: F001, B001, B2C5, etc.
-  if (s.length > 4) {
-    s = s.substring(0, 4)
-  }
-
-  return s
 }
 
 function extraerFecha(textoOriginal) {
