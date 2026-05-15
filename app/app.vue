@@ -1532,32 +1532,71 @@ function closingImageData(imageData, iteraciones = 1) {
   return erosionarImageData(dilatada, iteraciones)
 }
 
+function esLineaTotalExcluida(linea) {
+  return /SUB\s*TOTAL|SUBTOTAL|OP\.?\s*GRAVADA|OPERACION\s+GRAVADA|IGV|I\.G\.V|ISC|TOTAL\s+BRUTO|TOTAL\s+DEL\s+VALOR\s+VENTA|MONTO\s+TOTAL\s+TRIBUTOS|DESCUENTO|DSCTO|VUELTO|CAMBIO/.test(linea)
+}
+
+function esLineaTotalFinal(linea) {
+  if (esLineaTotalExcluida(linea)) return false
+
+  return /IMPORTE\s+TOTAL|TOTAL\s+A\s+PAGAR|TOTAL\s+NETO|TOTAL\s+GENERAL|TOTAL\s+COMPROBANTE|TOTAL\s+FINAL|\bTOTAL\s*[:：-]|^TOTAL\b|CONTADO|EFECTIVO|TARJETA|VISA|MASTERCARD/.test(linea)
+}
+
 function esLineaNoMontoFinal(linea) {
+  if (esLineaTotalFinal(linea)) return false
+
   return /RUC|DNI|FECHA|HORA|LOCAL|TERMINAL|SECUENCIA|CAJERO|CF\.?E?N?P?|EMP|CODIGO|ITEMS|NUMERO DE ITEMS|NRO|NO\.|BOLETA|FACTURA|GUIA|DIRECCION|AV\.|JR\.|CALLE/.test(linea)
 }
 
 function esLineaProductoOCR(linea) {
-  return /\b\d+(?:[.,]\d+)?\s*X\s*\d{1,6}[.,]\d{2}\b/i.test(linea)
+  if (!linea) return false
+  if (esLineaTotalFinal(linea)) return false
+  if (esLineaTotalExcluida(linea)) return false
+
+  return (
+    /\b\d+(?:[.,]\d+)?\s*X\s*\d{1,6}[.,]\d{2}\b/i.test(linea) ||
+    /\b\d+\s*(UND|UN|UNI|UNIDAD|UNIDADES)\b/i.test(linea) ||
+    /\bP\.?\s*V\.?\b|\bP\.?\s*T\.?\b/i.test(linea) ||
+    /DESCRIPCION|CANT\.?/.test(linea)
+  )
 }
 
 function contarLineasProducto(textoOriginal) {
   const lineas = obtenerLineas(textoOriginal)
   const productos = new Set()
 
-  for (const linea of lineas) {
-    if (/TOTAL|IMPORTE|IGV|I\.G\.V|SUBTOTAL|TRIBUTOS|RUC|DNI|FECHA|HORA|LOCAL|TERMINAL|SECUENCIA|CAJERO/.test(linea)) {
-      continue
-    }
+  for (let i = 0; i < lineas.length; i++) {
+    const linea = lineas[i]
 
-    const regex = /\b(\d+(?:[.,]\d+)?)\s*X\s*(\d{1,6}[.,]\d{2})\b/gi
-    let match
+    if (esLineaTotalFinal(linea) || esLineaTotalExcluida(linea)) continue
+    if (/RUC|DNI|FECHA|HORA|LOCAL|TERMINAL|SECUENCIA|CAJERO|BOLETA|FACTURA|GUIA/.test(linea)) continue
 
-    while ((match = regex.exec(linea)) !== null) {
-      const cantidad = String(match[1] || '').replace(',', '.')
-      const precio = limpiarMonto(match[2])
+    const regexCantidadPrecio = /\b(\d+(?:[.,]\d+)?)\s*X\s*(\d{1,6}[.,]\d{2})\b/gi
+    let matchCantidadPrecio
+
+    while ((matchCantidadPrecio = regexCantidadPrecio.exec(linea)) !== null) {
+      const cantidad = String(matchCantidadPrecio[1] || '').replace(',', '.')
+      const precio = limpiarMonto(matchCantidadPrecio[2])
 
       if (precio) {
-        productos.add(`${cantidad}|${precio}`)
+        productos.add(`X|${cantidad}|${precio}|${i}`)
+      }
+    }
+
+    // Tickets tipo: "1 UND        8.90 8.90"
+    if (/\b\d+\s*(UND|UN|UNI|UNIDAD|UNIDADES)\b/i.test(linea)) {
+      const montos = extraerMontosDeLinea(linea)
+
+      if (montos.length > 0) {
+        productos.add(`UND|${i}|${limpiarMonto(montos[montos.length - 1])}`)
+      } else {
+        // A veces el monto está en la misma zona, pero el OCR lo parte en la siguiente línea.
+        const siguiente = lineas[i + 1] || ''
+        const montosSiguiente = extraerMontosDeLinea(siguiente)
+
+        if (montosSiguiente.length > 0 && !esLineaTotalFinal(siguiente) && !esLineaTotalExcluida(siguiente)) {
+          productos.add(`UND|${i}|${limpiarMonto(montosSiguiente[montosSiguiente.length - 1])}`)
+        }
       }
     }
   }
@@ -1572,22 +1611,17 @@ function obtenerCandidatosMontos(textoOriginal, opciones = {}) {
 
   for (let i = 0; i < lineas.length; i++) {
     const linea = lineas[i]
+    const lineaFinal = esLineaTotalFinal(linea)
+    const lineaExcluida = esLineaTotalExcluida(linea)
+    const lineaProducto = esLineaProductoOCR(linea)
 
-    if (esLineaNoMontoFinal(linea)) continue
+    if (!lineaFinal && esLineaNoMontoFinal(linea)) continue
 
-    // Si la línea es solo impuestos/porcentajes, no debe competir como total
-    const lineaEsTributo = /IGV|I\.G\.V|ISC|TRIBUTOS|OP\.?\s*GRAVADA|OPERACION\s+GRAVADA/.test(linea)
-    const tieneCantidadPrecio = esLineaProductoOCR(linea)
-    const esLineaTotal = /IMPORTE\s+TOTAL|TOTAL\s+A\s+PAGAR|TOTAL\s+NETO|TOTAL\s+GENERAL/.test(linea)
+    // Si es impuesto/subtotal, no compite como total.
+    if (lineaExcluida && !lineaFinal) continue
 
-    if (lineaEsTributo && !tieneCantidadPrecio && !esLineaTotal) {
-      continue
-    }
-
-    // Si hay varios productos, no dejamos que los precios unitarios compitan como total.
-    if (excluirLineasProducto && tieneCantidadPrecio && !esLineaTotal) {
-      continue
-    }
+    // Si hay varios productos, no dejamos que precios unitarios compitan como total.
+    if (excluirLineasProducto && lineaProducto && !lineaFinal) continue
 
     const montos = extraerMontosDeLinea(linea)
 
@@ -1598,10 +1632,13 @@ function obtenerCandidatosMontos(textoOriginal, opciones = {}) {
 
       let puntaje = 0
 
-      if (/IMPORTE\s+TOTAL|TOTAL\s+A\s+PAGAR|TOTAL\s+NETO|TOTAL\s+GENERAL/.test(linea)) puntaje += 100
+      if (lineaFinal) puntaje += 180
+      if (/\bTOTAL\s*[:：-]|IMPORTE\s+TOTAL|TOTAL\s+NETO|TOTAL\s+A\s+PAGAR|TOTAL\s+GENERAL/.test(linea)) puntaje += 80
+      if (/CONTADO|EFECTIVO|TARJETA|VISA|MASTERCARD/.test(linea)) puntaje += 60
       if (/PEN|USD|S\/|\$/.test(linea)) puntaje += 20
-      if (tieneCantidadPrecio) puntaje += excluirLineasProducto ? -30 : 50
-      if (/PRECIO|CANT|VALOR|DESCRIPCION/.test(linea)) puntaje += excluirLineasProducto ? -20 : 5
+
+      if (lineaProducto && !lineaFinal) puntaje += excluirLineasProducto ? -80 : -30
+      if (/PRECIO|CANT|DESCRIPCION|P\.?\s*V\.?|P\.?\s*T\.?/.test(linea) && !lineaFinal) puntaje -= 40
 
       candidatos.push({
         monto: limpiarMonto(monto),
@@ -1640,8 +1677,8 @@ function extraerTotalPorRepeticion(textoOriginal, opciones = {}) {
   const agrupados = Object.values(conteo)
 
   agrupados.sort((a, b) => {
-    if (b.veces !== a.veces) return b.veces - a.veces
     if (b.puntaje !== a.puntaje) return b.puntaje - a.puntaje
+    if (b.veces !== a.veces) return b.veces - a.veces
     return b.valor - a.valor
   })
 
@@ -1654,14 +1691,24 @@ function extraerTotalPorItemUnico(textoOriginal) {
   for (let i = 0; i < lineas.length; i++) {
     const linea = lineas[i]
 
+    if (esLineaTotalFinal(linea) || esLineaTotalExcluida(linea)) continue
+
     // Ejemplo: 1 X 15.90
     const matchCantidadPrecio = linea.match(/\b\d+\s*X\s*(\d{1,6}[.,]\d{2})\b/i)
     if (matchCantidadPrecio) {
       return limpiarMonto(matchCantidadPrecio[1])
     }
 
+    // Ejemplo: 1 UND 8.90 8.90
+    if (/\b\d+\s*(UND|UN|UNI|UNIDAD|UNIDADES)\b/i.test(linea)) {
+      const montos = extraerMontosDeLinea(linea)
+      if (montos.length > 0) {
+        return limpiarMonto(montos[montos.length - 1])
+      }
+    }
+
     // Ejemplo: ALMOHADA ENROLLA PEN 15.90
-    if (/PEN|USD/.test(linea) && !esLineaNoMontoFinal(linea)) {
+    if (/PEN|USD/.test(linea) && !esLineaNoMontoFinal(linea) && !esLineaProductoOCR(linea)) {
       const montos = extraerMontosDeLinea(linea)
       if (montos.length > 0) {
         return limpiarMonto(montos[montos.length - 1])
@@ -1671,7 +1718,6 @@ function extraerTotalPorItemUnico(textoOriginal) {
 
   return ''
 }
-
 
 function extraerTotal(textoOriginal) {
   const lineas = obtenerLineas(textoOriginal)
@@ -1685,49 +1731,25 @@ function extraerTotal(textoOriginal) {
     /TOTAL\s+DE\s+VENTA/,
     /MONTO\s+TOTAL(?!\s+TRIBUTOS)/,
     /TOTAL\s+COMPROBANTE/,
-    /TOTAL\s+FINAL/
-  ]
-
-  const etiquetasExcluir = [
-    /SUB\s*TOTAL/,
-    /SUBTOTAL/,
-    /OP\.?\s*GRAVADA/,
-    /OPERACION\s+GRAVADA/,
-    /IGV/,
-    /I\.G\.V/,
-    /ISC/,
-    /TOTAL\s+BRUTO/,
-    /TOTAL\s+DEL\s+VALOR\s+VENTA/,
-    /MONTO\s+TOTAL\s+TRIBUTOS/,
-    /DESCUENTO/,
-    /DSCTO/,
-    /VUELTO/,
-    /CAMBIO/,
-    /DNI/,
-    /RUC/,
-    /FECHA/,
-    /HORA/
+    /TOTAL\s+FINAL/,
+    /\bTOTAL\s*[:：-]/,
+    /^TOTAL\b/
   ]
 
   function esEtiquetaFinal(linea) {
-    return etiquetasFinales.some(patron => patron.test(linea))
+    return etiquetasFinales.some(patron => patron.test(linea)) && !esLineaTotalExcluida(linea)
   }
 
-  function esEtiquetaExcluida(linea) {
-    return etiquetasExcluir.some(patron => patron.test(linea))
-  }
-
-  // 1. Buscar por etiqueta final
-  for (let i = 0; i < lineas.length; i++) {
+  // 1. Buscar desde abajo hacia arriba. En tickets, el total real casi siempre está al final.
+  for (let i = lineas.length - 1; i >= 0; i--) {
     const linea = lineas[i]
 
-    if (esEtiquetaFinal(linea) && !esEtiquetaExcluida(linea)) {
+    if (esEtiquetaFinal(linea)) {
       const bloque = [
+        lineas[i - 1] || '',
         lineas[i] || '',
         lineas[i + 1] || '',
-        lineas[i + 2] || '',
-        lineas[i + 3] || '',
-        lineas[i + 4] || ''
+        lineas[i + 2] || ''
       ].join(' ')
 
       const montosBloque = extraerMontosDeLinea(bloque)
@@ -1741,21 +1763,38 @@ function extraerTotal(textoOriginal) {
   const cantidadProductos = contarLineasProducto(textoOriginal)
   const hayVariosProductos = cantidadProductos > 1
 
-  // 2. Si hay varios productos, buscamos montos repetidos sin usar líneas tipo "cantidad X precio".
-  // Esto evita tomar el precio unitario de un producto como total.
+  // 2. Buscar líneas de pago desde abajo: CONTADO, EFECTIVO, TARJETA.
+  for (let i = lineas.length - 1; i >= 0; i--) {
+    const linea = lineas[i]
+
+    if (/CONTADO|EFECTIVO|TARJETA|VISA|MASTERCARD/.test(linea)) {
+      const bloque = [
+        lineas[i] || '',
+        lineas[i + 1] || '',
+        lineas[i + 2] || ''
+      ].join(' ')
+
+      const montosBloque = extraerMontosDeLinea(bloque)
+
+      if (montosBloque.length > 0) {
+        return limpiarMonto(montosBloque[montosBloque.length - 1])
+      }
+    }
+  }
+
+  // 3. Si hay varios productos, buscamos montos repetidos sin usar líneas de productos.
   const porRepeticion = extraerTotalPorRepeticion(textoOriginal, {
     excluirLineasProducto: hayVariosProductos
   })
   if (porRepeticion) return porRepeticion
 
-  // 3. Solo si hay un producto, usamos el precio del item como respaldo.
+  // 4. Solo si hay un producto, usamos el precio del item como respaldo.
   if (!hayVariosProductos) {
     const porItemUnico = extraerTotalPorItemUnico(textoOriginal)
     if (porItemUnico) return porItemUnico
   }
 
-  // 4. Último respaldo: mayor monto válido, ya sin porcentajes.
-  // Si hay varios productos, también excluye precios unitarios.
+  // 5. Último respaldo: mejor candidato. Si hay varios productos, excluye precios unitarios.
   const candidatos = obtenerCandidatosMontos(textoOriginal, {
     excluirLineasProducto: hayVariosProductos
   })
