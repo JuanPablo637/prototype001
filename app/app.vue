@@ -145,13 +145,22 @@
       <!-- TEXTO OCR -->
       <section v-if="textoOCR" class="ocr-box">
         <div class="ocr-header">
-          <h2>Texto leído por OCR</h2>
+          <h2>Resumen OCR ordenado</h2>
           <button class="btn-small" @click="mostrarTextoOCR = !mostrarTextoOCR">
-            {{ mostrarTextoOCR ? 'Ocultar' : 'Ver texto' }}
+            {{ mostrarTextoOCR ? 'Ocultar' : 'Ver resumen' }}
           </button>
         </div>
 
         <pre v-if="mostrarTextoOCR">{{ textoOCR }}</pre>
+
+        <div class="ocr-header debug-header" v-if="textoOCRDebug">
+          <h2>Texto OCR bruto</h2>
+          <button class="btn-small" @click="mostrarDebugOCR = !mostrarDebugOCR">
+            {{ mostrarDebugOCR ? 'Ocultar debug' : 'Ver debug' }}
+          </button>
+        </div>
+
+        <pre v-if="mostrarDebugOCR">{{ textoOCRDebug }}</pre>
       </section>
 
       <!-- MENSAJE -->
@@ -180,7 +189,9 @@ const procesando = ref(false)
 const progresoOCR = ref(0)
 const mensaje = ref('')
 const textoOCR = ref('')
+const textoOCRDebug = ref('')
 const mostrarTextoOCR = ref(false)
+const mostrarDebugOCR = ref(false)
 
 const form = reactive({
   tipoDocumento: '',
@@ -222,7 +233,9 @@ function seleccionarImagen(event) {
 
   datosProcesados.value = false
   textoOCR.value = ''
+  textoOCRDebug.value = ''
   mostrarTextoOCR.value = false
+  mostrarDebugOCR.value = false
   progresoOCR.value = 0
 
   limpiarFormulario()
@@ -263,6 +276,8 @@ function confirmarRecorte() {
       mostrarEditorRecorte.value = false
       datosProcesados.value = false
       textoOCR.value = ''
+      textoOCRDebug.value = ''
+      mostrarDebugOCR.value = false
       progresoOCR.value = 0
 
       limpiarFormulario()
@@ -279,6 +294,9 @@ function cancelarRecorte() {
   imagenOriginalPreview.value = ''
   imagenFile.value = null
   imagenPreview.value = ''
+  textoOCR.value = ''
+  textoOCRDebug.value = ''
+  mostrarDebugOCR.value = false
   mensaje.value = 'Recorte cancelado. Toma otra foto.'
 }
 
@@ -834,9 +852,9 @@ async function procesarImagen() {
       textosTotales
     ].join('\n\n')
 
-    textoOCR.value = textoCombinado
+    textoOCRDebug.value = textoCombinado
 
-    const datos = extraerDatos(textoOCR.value)
+    const datos = extraerDatos(textoOCRDebug.value)
 
     form.tipoDocumento = datos.tipoDocumento
     form.ruc = datos.ruc
@@ -846,6 +864,8 @@ async function procesarImagen() {
     form.fecha = datos.fecha
     form.total = datos.total
     form.moneda = datos.moneda
+
+    textoOCR.value = construirTextoOCRLimpio(datos)
 
     datosProcesados.value = true
     mensaje.value = `OCR terminado. Confianza aproximada: ${Math.round(mejorConfianza)}%. Revisa antes de subir.`
@@ -1223,17 +1243,16 @@ function extraerDocumento(textoOriginal) {
   const lineas = obtenerLineas(textoOriginal)
   const textoPlano = limpiarTextoPlano(textoOriginal)
 
-  // 1. Primero buscar cerca de BOLETA / FACTURA / GUIA / NOTA
+  // 1. Primero buscar cerca de BOLETA / FACTURA / GUIA
   for (let i = 0; i < lineas.length; i++) {
     const linea = lineas[i]
 
-    if (/BOLETA|FACTURA|GUIA|NOTA|TICKET|RECIBO/.test(linea)) {
+    if (/BOLETA|FACTURA|GUIA|NOTA/.test(linea)) {
       const bloque = [
         lineas[i - 1] || '',
         lineas[i] || '',
         lineas[i + 1] || '',
-        lineas[i + 2] || '',
-        lineas[i + 3] || ''
+        lineas[i + 2] || ''
       ].join(' ')
 
       const doc = buscarSerieNumeroEnTexto(bloque)
@@ -1242,7 +1261,7 @@ function extraerDocumento(textoOriginal) {
     }
   }
 
-  // 2. Buscar en cabeceras procesadas por secciones
+  // 2. Buscar en la zona marcada como cabecera si existe
   const matchCabecera = textoPlano.match(/\[CABECERAS\](.*?)(\[TOTALES\]|$)/i)
 
   if (matchCabecera && matchCabecera[1]) {
@@ -1279,7 +1298,7 @@ function buscarSerieNumeroEnTexto(textoEntrada) {
     .replace(/\s+/g, ' ')
 
   const patronesConContexto = [
-    /(?:BOLETA|FACTURA|GUIA|NOTA|TICKET|RECIBO).*?(?:NO\.?|N\.?)?\s*([FBTE][A-Z0-9]{2,3})[-\s]*(\d{4,10})/i,
+    /(?:BOLETA|FACTURA|GUIA|NOTA).*?(?:NO\.?|N\.?)?\s*([FBTE][A-Z0-9]{2,3})[-\s]*(\d{4,10})/i,
     /(?:NO\.?|N\.?)\s*([FBTE][A-Z0-9]{2,3})[-\s]*(\d{4,10})/i,
     /\b([FBTE][A-Z0-9]{2,3})[-\s]*(\d{6,10})\b/i,
     /\b([FBTE][A-Z0-9]{2,3})(\d{6,10})\b/i
@@ -1289,8 +1308,8 @@ function buscarSerieNumeroEnTexto(textoEntrada) {
     const match = texto.match(patron)
 
     if (match) {
-      const serie = limpiarSerieOCR(match[1])
-      const numero = String(match[2] || '').replace(/\D/g, '')
+      let serie = limpiarSerieOCR(match[1])
+      let numero = String(match[2] || '').replace(/\D/g, '')
 
       if (serie && numero.length >= 4) {
         return {
@@ -1314,11 +1333,12 @@ function limpiarSerieOCR(serie) {
 
   if (!s) return ''
 
-  // Correcciones suaves de OCR, sin amarrarlo a un proveedor específico
+  // Correcciones suaves, sin forzar proveedor.
+  // Ejemplo: 8ZC5 puede venir de BZC5.
   s = s
     .replace(/^8/, 'B')
+    .replace(/^6/, 'G')
 
-  // La serie normalmente tiene 4 caracteres: F001, B001, B2C5, etc.
   if (s.length > 4) {
     s = s.substring(0, 4)
   }
@@ -1747,6 +1767,39 @@ function convertirMontoANumero(monto) {
 
 
 
+function construirTextoOCRLimpio(datos) {
+  const lineas = []
+
+  lineas.push('COMPROBANTE PROCESADO')
+  lineas.push('----------------------')
+  lineas.push(`Tipo de documento: ${datos.tipoDocumento || 'No detectado'}`)
+  lineas.push(`RUC proveedor: ${datos.ruc || 'No detectado'}`)
+  lineas.push(`Proveedor: ${datos.proveedor || 'No detectado'}`)
+  lineas.push(`Serie: ${datos.serie || 'No detectado'}`)
+  lineas.push(`Número: ${datos.numero || 'No detectado'}`)
+  lineas.push(`Fecha de emisión: ${datos.fecha || 'No detectado'}`)
+  lineas.push(`Total: ${datos.total ? datos.total : 'No detectado'}`)
+  lineas.push(`Moneda: ${datos.moneda || 'PEN'}`)
+
+  const observaciones = []
+
+  if (!datos.ruc) observaciones.push('Revisar RUC')
+  if (!datos.serie) observaciones.push('Revisar serie')
+  if (!datos.numero) observaciones.push('Revisar número')
+  if (!datos.fecha) observaciones.push('Revisar fecha')
+  if (!datos.total) observaciones.push('Revisar total')
+
+  if (observaciones.length > 0) {
+    lineas.push('')
+    lineas.push('OBSERVACIONES')
+    lineas.push('-------------')
+    observaciones.forEach(obs => lineas.push(`- ${obs}`))
+  }
+
+  return lineas.join('\n')
+}
+
+
 async function subirDatos() {
   if (!datosProcesados.value) {
     mensaje.value = 'Primero debes procesar la imagen.'
@@ -1766,7 +1819,8 @@ async function subirDatos() {
       total: form.total,
       moneda: form.moneda,
       estado: 'Procesado',
-      textoOCR: textoOCR.value
+      textoOCR: textoOCR.value,
+      textoOCRDebug: textoOCRDebug.value
     }
 
     const response = await $fetch('/api/comprobantes', {
@@ -2048,6 +2102,10 @@ pre {
 
 .cancel {
   background: #6b7280;
+}
+
+.debug-header {
+  margin-top: 18px;
 }
 
 </style>
