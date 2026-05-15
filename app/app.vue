@@ -145,22 +145,13 @@
       <!-- TEXTO OCR -->
       <section v-if="textoOCR" class="ocr-box">
         <div class="ocr-header">
-          <h2>Resumen OCR ordenado</h2>
+          <h2>Texto extraído</h2>
           <button class="btn-small" @click="mostrarTextoOCR = !mostrarTextoOCR">
-            {{ mostrarTextoOCR ? 'Ocultar' : 'Ver resumen' }}
+            {{ mostrarTextoOCR ? 'Ocultar' : 'Ver texto extraído' }}
           </button>
         </div>
 
         <pre v-if="mostrarTextoOCR">{{ textoOCR }}</pre>
-
-        <div class="ocr-header debug-header" v-if="textoOCRDebug">
-          <h2>Texto OCR bruto</h2>
-          <button class="btn-small" @click="mostrarDebugOCR = !mostrarDebugOCR">
-            {{ mostrarDebugOCR ? 'Ocultar debug' : 'Ver debug' }}
-          </button>
-        </div>
-
-        <pre v-if="mostrarDebugOCR">{{ textoOCRDebug }}</pre>
       </section>
 
       <!-- MENSAJE -->
@@ -189,9 +180,7 @@ const procesando = ref(false)
 const progresoOCR = ref(0)
 const mensaje = ref('')
 const textoOCR = ref('')
-const textoOCRDebug = ref('')
 const mostrarTextoOCR = ref(false)
-const mostrarDebugOCR = ref(false)
 
 const form = reactive({
   tipoDocumento: '',
@@ -233,9 +222,7 @@ function seleccionarImagen(event) {
 
   datosProcesados.value = false
   textoOCR.value = ''
-  textoOCRDebug.value = ''
   mostrarTextoOCR.value = false
-  mostrarDebugOCR.value = false
   progresoOCR.value = 0
 
   limpiarFormulario()
@@ -276,8 +263,6 @@ function confirmarRecorte() {
       mostrarEditorRecorte.value = false
       datosProcesados.value = false
       textoOCR.value = ''
-      textoOCRDebug.value = ''
-      mostrarDebugOCR.value = false
       progresoOCR.value = 0
 
       limpiarFormulario()
@@ -294,9 +279,6 @@ function cancelarRecorte() {
   imagenOriginalPreview.value = ''
   imagenFile.value = null
   imagenPreview.value = ''
-  textoOCR.value = ''
-  textoOCRDebug.value = ''
-  mostrarDebugOCR.value = false
   mensaje.value = 'Recorte cancelado. Toma otra foto.'
 }
 
@@ -759,6 +741,29 @@ function generarVersionesOCRPorSecciones(file) {
   })
 }
 
+
+function puntuarTextoOCR(item) {
+  const texto = normalizarOCR(item.texto || '')
+  let puntaje = 0
+
+  // Datos clave del comprobante
+  if (/\b(10|20)\d{9}\b/.test(texto)) puntaje += 80
+  if (/\b[FBTE][A-Z0-9]{2,4}[-\s]?\d{4,10}\b/.test(texto)) puntaje += 90
+  if (/BOLETA|FACTURA|GUIA|NOTA|ELECTRONICA|ELECTRONICO/.test(texto)) puntaje += 50
+  if (/\b\d{2}[\/\-]\d{2}[\/\-]\d{4}\b/.test(texto)) puntaje += 50
+  if (/IMPORTE\s+TOTAL|TOTAL\s+NETO|TOTAL\s+A\s+PAGAR|TOTAL\s+GENERAL|CONTADO|EFECTIVO|TARJETA/.test(texto)) puntaje += 70
+  if (/\d{1,6}[.,]\d{2}/.test(texto)) puntaje += 30
+  if (/PEN|USD|S\/|\$/.test(texto)) puntaje += 20
+
+  // Penaliza textos con mucho ruido visual
+  if ((texto.match(/[=<>_|]/g) || []).length > 20) puntaje -= 20
+
+  // La confianza ayuda, pero no decide sola
+  puntaje += Math.round((item.confianza || 0) / 10)
+
+  return puntaje
+}
+
 async function procesarImagen() {
   if (!imagenFile.value) {
     mensaje.value = 'Primero debes tomar o seleccionar una foto.'
@@ -827,34 +832,48 @@ async function procesarImagen() {
       }
     }
 
+    const textosGlobales = textosDetectados
+      .map(t => ({
+        ...t,
+        puntaje: puntuarTextoOCR(t)
+      }))
+      .sort((a, b) => b.puntaje - a.puntaje)
+      .slice(0, 6)
+      .map(t => t.texto)
+      .join('\n\n')
+
     const textosCabecera = textosDetectados
-      .filter(t =>
-        t.nombre.includes('cabecera') ||
-        t.nombre.includes('documento')
-      )
-      .map(t => `[${t.nombre}]\n${t.texto}`)
+      .filter(t => t.nombre.includes('cabecera') || t.nombre.includes('documento'))
+      .map(t => ({
+        ...t,
+        puntaje: puntuarTextoOCR(t)
+      }))
+      .sort((a, b) => b.puntaje - a.puntaje)
+      .slice(0, 8)
+      .map(t => t.texto)
       .join('\n\n')
 
     const textosTotales = textosDetectados
-      .filter(t =>
-        t.nombre.includes('total') ||
-        t.nombre.includes('inferior')
-      )
-      .map(t => `[${t.nombre}]\n${t.texto}`)
+      .filter(t => t.nombre.includes('total') || t.nombre.includes('inferior'))
+      .map(t => ({
+        ...t,
+        puntaje: puntuarTextoOCR(t)
+      }))
+      .sort((a, b) => b.puntaje - a.puntaje)
+      .slice(0, 6)
+      .map(t => t.texto)
       .join('\n\n')
 
-    const textoCombinado = [
-      '[MEJOR_TEXTO]',
+    const textoParaExtraccion = [
+      textosGlobales,
       mejorTexto,
-      '[CABECERAS]',
       textosCabecera,
-      '[TOTALES]',
       textosTotales
-    ].join('\n\n')
+    ]
+      .filter(Boolean)
+      .join('\n\n')
 
-    textoOCRDebug.value = textoCombinado
-
-    const datos = extraerDatos(textoOCRDebug.value)
+    const datos = extraerDatos(textoParaExtraccion)
 
     form.tipoDocumento = datos.tipoDocumento
     form.ruc = datos.ruc
@@ -865,7 +884,7 @@ async function procesarImagen() {
     form.total = datos.total
     form.moneda = datos.moneda
 
-    textoOCR.value = construirTextoOCRLimpio(datos)
+    textoOCR.value = construirTextoExtraidoOrdenado(datos, textoParaExtraccion)
 
     datosProcesados.value = true
     mensaje.value = `OCR terminado. Confianza aproximada: ${Math.round(mejorConfianza)}%. Revisa antes de subir.`
@@ -1152,6 +1171,66 @@ function extraerProveedor(textoOriginal) {
 
 
 
+
+function construirTextoExtraidoOrdenado(datos, textoFuente) {
+  const lineas = []
+
+  lineas.push('DATOS EXTRAÍDOS')
+  lineas.push('---------------')
+  lineas.push(`Tipo de documento: ${datos.tipoDocumento || ''}`)
+  lineas.push(`RUC: ${datos.ruc || ''}`)
+  lineas.push(`Proveedor: ${datos.proveedor || ''}`)
+  lineas.push(`Serie: ${datos.serie || ''}`)
+  lineas.push(`Número: ${datos.numero || ''}`)
+  lineas.push(`Fecha de emisión: ${datos.fecha || ''}`)
+  lineas.push(`Total: ${datos.total || ''}`)
+  lineas.push(`Moneda: ${datos.moneda || ''}`)
+
+  const relevantes = obtenerLineasRelevantesOCR(textoFuente)
+
+  if (relevantes.length > 0) {
+    lineas.push('')
+    lineas.push('TEXTO EXTRAÍDO ORDENADO')
+    lineas.push('-----------------------')
+    relevantes.forEach(linea => lineas.push(linea))
+  }
+
+  return lineas.join('\n')
+}
+
+function obtenerLineasRelevantesOCR(textoFuente) {
+  const lineas = obtenerLineas(textoFuente)
+  const resultado = []
+  const vistas = new Set()
+
+  const patronesImportantes = [
+    /RUC|AUC/,
+    /BOLETA|FACTURA|GUIA|NOTA|ELECTRONICA/,
+    /\b[FBTE][A-Z0-9]{2,4}[-\s]?\d{4,10}\b/,
+    /FECHA|HORA/,
+    /TOTAL|IMPORTE|NETO|PAGO|CONTADO|EFECTIVO|TARJETA/,
+    /PEN|USD|S\/|\$/,
+    /DNI/,
+    /SRS|CLIENTE|PROVEEDOR|DYNATECH|TOTTUS|GRIFOS|HIPERMERCADOS/
+  ]
+
+  for (const linea of lineas) {
+    const limpia = linea.replace(/\s+/g, ' ').trim()
+
+    if (limpia.length < 3) continue
+    if (vistas.has(limpia)) continue
+
+    if (patronesImportantes.some(patron => patron.test(limpia))) {
+      resultado.push(limpia)
+      vistas.add(limpia)
+    }
+
+    if (resultado.length >= 24) break
+  }
+
+  return resultado
+}
+
 function extraerDatos(textoOriginal) {
   const documento = extraerDocumento(textoOriginal)
   const ruc = extraerRUCProveedor(textoOriginal)
@@ -1243,16 +1322,18 @@ function extraerDocumento(textoOriginal) {
   const lineas = obtenerLineas(textoOriginal)
   const textoPlano = limpiarTextoPlano(textoOriginal)
 
-  // 1. Primero buscar cerca de BOLETA / FACTURA / GUIA
+  // 1. Buscar primero alrededor de BOLETA / FACTURA / GUIA / NOTA
   for (let i = 0; i < lineas.length; i++) {
     const linea = lineas[i]
 
-    if (/BOLETA|FACTURA|GUIA|NOTA/.test(linea)) {
+    if (/BOLETA|FACTURA|GUIA|NOTA|ELECTRONICA|ELECTRONICO/.test(linea)) {
       const bloque = [
+        lineas[i - 2] || '',
         lineas[i - 1] || '',
         lineas[i] || '',
         lineas[i + 1] || '',
-        lineas[i + 2] || ''
+        lineas[i + 2] || '',
+        lineas[i + 3] || ''
       ].join(' ')
 
       const doc = buscarSerieNumeroEnTexto(bloque)
@@ -1261,18 +1342,7 @@ function extraerDocumento(textoOriginal) {
     }
   }
 
-  // 2. Buscar en la zona marcada como cabecera si existe
-  const matchCabecera = textoPlano.match(/\[CABECERAS\](.*?)(\[TOTALES\]|$)/i)
-
-  if (matchCabecera && matchCabecera[1]) {
-    const docCabecera = buscarSerieNumeroEnTexto(matchCabecera[1])
-
-    if (docCabecera.serie && docCabecera.numero) {
-      return docCabecera
-    }
-  }
-
-  // 3. Búsqueda general
+  // 2. Buscar con prioridad en texto completo combinado de cabecera y zonas OCR
   const docGeneral = buscarSerieNumeroEnTexto(textoPlano)
 
   if (docGeneral.serie && docGeneral.numero) {
@@ -1290,7 +1360,8 @@ function buscarSerieNumeroEnTexto(textoEntrada) {
 
   texto = texto
     .replace(/N\s*[°º]\s*/g, 'NO. ')
-    .replace(/\bNRO\b/g, 'NO. ')
+    .replace(/N\s*O\s*\./g, 'NO. ')
+    .replace(/\bNRO\.?\b/g, 'NO. ')
     .replace(/\bNUMERO\b/g, 'NO. ')
     .replace(/\bNO\s*[:.-]?\s*/g, 'NO. ')
     .replace(/[–—]/g, '-')
@@ -1298,10 +1369,11 @@ function buscarSerieNumeroEnTexto(textoEntrada) {
     .replace(/\s+/g, ' ')
 
   const patronesConContexto = [
-    /(?:BOLETA|FACTURA|GUIA|NOTA).*?(?:NO\.?|N\.?)?\s*([FBTE][A-Z0-9]{2,3})[-\s]*(\d{4,10})/i,
-    /(?:NO\.?|N\.?)\s*([FBTE][A-Z0-9]{2,3})[-\s]*(\d{4,10})/i,
-    /\b([FBTE][A-Z0-9]{2,3})[-\s]*(\d{6,10})\b/i,
-    /\b([FBTE][A-Z0-9]{2,3})(\d{6,10})\b/i
+    /(?:BOLETA|FACTURA|GUIA|NOTA).*?(?:NO\.?|N\.?)?\s*([FBTE][A-Z0-9]{2,4})[-\s]*(\d{4,10})/i,
+    /(?:BOLETA|FACTURA|GUIA|NOTA).*?([FBTE][A-Z0-9]{2,4})[-\s]*(\d{4,10})/i,
+    /(?:NO\.?|N\.?)\s*([FBTE][A-Z0-9]{2,4})[-\s]*(\d{4,10})/i,
+    /\b([FBTE][A-Z0-9]{2,4})[-\s]+(\d{4,10})\b/i,
+    /\b([FBTE][A-Z0-9]{2,4})(\d{6,10})\b/i
   ]
 
   for (const patron of patronesConContexto) {
@@ -1333,8 +1405,6 @@ function limpiarSerieOCR(serie) {
 
   if (!s) return ''
 
-  // Correcciones suaves, sin forzar proveedor.
-  // Ejemplo: 8ZC5 puede venir de BZC5.
   s = s
     .replace(/^8/, 'B')
     .replace(/^6/, 'G')
@@ -1466,9 +1536,39 @@ function esLineaNoMontoFinal(linea) {
   return /RUC|DNI|FECHA|HORA|LOCAL|TERMINAL|SECUENCIA|CAJERO|CF\.?E?N?P?|EMP|CODIGO|ITEMS|NUMERO DE ITEMS|NRO|NO\.|BOLETA|FACTURA|GUIA|DIRECCION|AV\.|JR\.|CALLE/.test(linea)
 }
 
-function obtenerCandidatosMontos(textoOriginal) {
+function esLineaProductoOCR(linea) {
+  return /\b\d+(?:[.,]\d+)?\s*X\s*\d{1,6}[.,]\d{2}\b/i.test(linea)
+}
+
+function contarLineasProducto(textoOriginal) {
+  const lineas = obtenerLineas(textoOriginal)
+  const productos = new Set()
+
+  for (const linea of lineas) {
+    if (/TOTAL|IMPORTE|IGV|I\.G\.V|SUBTOTAL|TRIBUTOS|RUC|DNI|FECHA|HORA|LOCAL|TERMINAL|SECUENCIA|CAJERO/.test(linea)) {
+      continue
+    }
+
+    const regex = /\b(\d+(?:[.,]\d+)?)\s*X\s*(\d{1,6}[.,]\d{2})\b/gi
+    let match
+
+    while ((match = regex.exec(linea)) !== null) {
+      const cantidad = String(match[1] || '').replace(',', '.')
+      const precio = limpiarMonto(match[2])
+
+      if (precio) {
+        productos.add(`${cantidad}|${precio}`)
+      }
+    }
+  }
+
+  return productos.size
+}
+
+function obtenerCandidatosMontos(textoOriginal, opciones = {}) {
   const lineas = obtenerLineas(textoOriginal)
   const candidatos = []
+  const excluirLineasProducto = Boolean(opciones.excluirLineasProducto)
 
   for (let i = 0; i < lineas.length; i++) {
     const linea = lineas[i]
@@ -1477,10 +1577,15 @@ function obtenerCandidatosMontos(textoOriginal) {
 
     // Si la línea es solo impuestos/porcentajes, no debe competir como total
     const lineaEsTributo = /IGV|I\.G\.V|ISC|TRIBUTOS|OP\.?\s*GRAVADA|OPERACION\s+GRAVADA/.test(linea)
-    const tieneCantidadPrecio = /\b\d+\s*X\s*\d{1,6}[.,]\d{2}\b/.test(linea)
+    const tieneCantidadPrecio = esLineaProductoOCR(linea)
     const esLineaTotal = /IMPORTE\s+TOTAL|TOTAL\s+A\s+PAGAR|TOTAL\s+NETO|TOTAL\s+GENERAL/.test(linea)
 
     if (lineaEsTributo && !tieneCantidadPrecio && !esLineaTotal) {
+      continue
+    }
+
+    // Si hay varios productos, no dejamos que los precios unitarios compitan como total.
+    if (excluirLineasProducto && tieneCantidadPrecio && !esLineaTotal) {
       continue
     }
 
@@ -1495,8 +1600,8 @@ function obtenerCandidatosMontos(textoOriginal) {
 
       if (/IMPORTE\s+TOTAL|TOTAL\s+A\s+PAGAR|TOTAL\s+NETO|TOTAL\s+GENERAL/.test(linea)) puntaje += 100
       if (/PEN|USD|S\/|\$/.test(linea)) puntaje += 20
-      if (/\b\d+\s*X\s*\d{1,6}[.,]\d{2}\b/.test(linea)) puntaje += 50
-      if (/PRECIO|CANT|VALOR|DESCRIPCION/.test(linea)) puntaje += 5
+      if (tieneCantidadPrecio) puntaje += excluirLineasProducto ? -30 : 50
+      if (/PRECIO|CANT|VALOR|DESCRIPCION/.test(linea)) puntaje += excluirLineasProducto ? -20 : 5
 
       candidatos.push({
         monto: limpiarMonto(monto),
@@ -1511,8 +1616,8 @@ function obtenerCandidatosMontos(textoOriginal) {
   return candidatos
 }
 
-function extraerTotalPorRepeticion(textoOriginal) {
-  const candidatos = obtenerCandidatosMontos(textoOriginal)
+function extraerTotalPorRepeticion(textoOriginal, opciones = {}) {
+  const candidatos = obtenerCandidatosMontos(textoOriginal, opciones)
 
   if (candidatos.length === 0) return ''
 
@@ -1633,16 +1738,27 @@ function extraerTotal(textoOriginal) {
     }
   }
 
-  // 2. Si el OCR no puso monto junto a IMPORTE TOTAL, buscar precio final tipo "1 X 15.90"
-  const porItemUnico = extraerTotalPorItemUnico(textoOriginal)
-  if (porItemUnico) return porItemUnico
+  const cantidadProductos = contarLineasProducto(textoOriginal)
+  const hayVariosProductos = cantidadProductos > 1
 
-  // 3. Luego buscar por repetición de montos válidos
-  const porRepeticion = extraerTotalPorRepeticion(textoOriginal)
+  // 2. Si hay varios productos, buscamos montos repetidos sin usar líneas tipo "cantidad X precio".
+  // Esto evita tomar el precio unitario de un producto como total.
+  const porRepeticion = extraerTotalPorRepeticion(textoOriginal, {
+    excluirLineasProducto: hayVariosProductos
+  })
   if (porRepeticion) return porRepeticion
 
-  // 4. Último respaldo: mayor monto válido, ya sin porcentajes
-  const candidatos = obtenerCandidatosMontos(textoOriginal)
+  // 3. Solo si hay un producto, usamos el precio del item como respaldo.
+  if (!hayVariosProductos) {
+    const porItemUnico = extraerTotalPorItemUnico(textoOriginal)
+    if (porItemUnico) return porItemUnico
+  }
+
+  // 4. Último respaldo: mayor monto válido, ya sin porcentajes.
+  // Si hay varios productos, también excluye precios unitarios.
+  const candidatos = obtenerCandidatosMontos(textoOriginal, {
+    excluirLineasProducto: hayVariosProductos
+  })
 
   if (candidatos.length === 0) return ''
 
@@ -1767,39 +1883,6 @@ function convertirMontoANumero(monto) {
 
 
 
-function construirTextoOCRLimpio(datos) {
-  const lineas = []
-
-  lineas.push('COMPROBANTE PROCESADO')
-  lineas.push('----------------------')
-  lineas.push(`Tipo de documento: ${datos.tipoDocumento || 'No detectado'}`)
-  lineas.push(`RUC proveedor: ${datos.ruc || 'No detectado'}`)
-  lineas.push(`Proveedor: ${datos.proveedor || 'No detectado'}`)
-  lineas.push(`Serie: ${datos.serie || 'No detectado'}`)
-  lineas.push(`Número: ${datos.numero || 'No detectado'}`)
-  lineas.push(`Fecha de emisión: ${datos.fecha || 'No detectado'}`)
-  lineas.push(`Total: ${datos.total ? datos.total : 'No detectado'}`)
-  lineas.push(`Moneda: ${datos.moneda || 'PEN'}`)
-
-  const observaciones = []
-
-  if (!datos.ruc) observaciones.push('Revisar RUC')
-  if (!datos.serie) observaciones.push('Revisar serie')
-  if (!datos.numero) observaciones.push('Revisar número')
-  if (!datos.fecha) observaciones.push('Revisar fecha')
-  if (!datos.total) observaciones.push('Revisar total')
-
-  if (observaciones.length > 0) {
-    lineas.push('')
-    lineas.push('OBSERVACIONES')
-    lineas.push('-------------')
-    observaciones.forEach(obs => lineas.push(`- ${obs}`))
-  }
-
-  return lineas.join('\n')
-}
-
-
 async function subirDatos() {
   if (!datosProcesados.value) {
     mensaje.value = 'Primero debes procesar la imagen.'
@@ -1819,8 +1902,7 @@ async function subirDatos() {
       total: form.total,
       moneda: form.moneda,
       estado: 'Procesado',
-      textoOCR: textoOCR.value,
-      textoOCRDebug: textoOCRDebug.value
+      textoOCR: textoOCR.value
     }
 
     const response = await $fetch('/api/comprobantes', {
@@ -2102,10 +2184,6 @@ pre {
 
 .cancel {
   background: #6b7280;
-}
-
-.debug-header {
-  margin-top: 18px;
 }
 
 </style>
