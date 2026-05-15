@@ -1138,6 +1138,15 @@ function obtenerCandidatosMontos(textoOriginal) {
 
     if (esLineaNoMontoFinal(linea)) continue
 
+    // Si la línea es solo impuestos/porcentajes, no debe competir como total
+    const lineaEsTributo = /IGV|I\.G\.V|ISC|TRIBUTOS|OP\.?\s*GRAVADA|OPERACION\s+GRAVADA/.test(linea)
+    const tieneCantidadPrecio = /\b\d+\s*X\s*\d{1,6}[.,]\d{2}\b/.test(linea)
+    const esLineaTotal = /IMPORTE\s+TOTAL|TOTAL\s+A\s+PAGAR|TOTAL\s+NETO|TOTAL\s+GENERAL/.test(linea)
+
+    if (lineaEsTributo && !tieneCantidadPrecio && !esLineaTotal) {
+      continue
+    }
+
     const montos = extraerMontosDeLinea(linea)
 
     for (const monto of montos) {
@@ -1149,7 +1158,7 @@ function obtenerCandidatosMontos(textoOriginal) {
 
       if (/IMPORTE\s+TOTAL|TOTAL\s+A\s+PAGAR|TOTAL\s+NETO|TOTAL\s+GENERAL/.test(linea)) puntaje += 100
       if (/PEN|USD|S\/|\$/.test(linea)) puntaje += 20
-      if (/X\s*\d{1,6}[.,]\d{2}/.test(linea)) puntaje += 15
+      if (/\b\d+\s*X\s*\d{1,6}[.,]\d{2}\b/.test(linea)) puntaje += 50
       if (/PRECIO|CANT|VALOR|DESCRIPCION/.test(linea)) puntaje += 5
 
       candidatos.push({
@@ -1287,15 +1296,15 @@ function extraerTotal(textoOriginal) {
     }
   }
 
-  // 2. Caso OCR: "IMPORTE TOTAL S/" y el monto no aparece al costado.
-  // Se usa monto repetido o precio del item.
-  const porRepeticion = extraerTotalPorRepeticion(textoOriginal)
-  if (porRepeticion) return porRepeticion
-
+  // 2. Si el OCR no puso monto junto a IMPORTE TOTAL, buscar precio final tipo "1 X 15.90"
   const porItemUnico = extraerTotalPorItemUnico(textoOriginal)
   if (porItemUnico) return porItemUnico
 
-  // 3. Último respaldo: mayor monto válido
+  // 3. Luego buscar por repetición de montos válidos
+  const porRepeticion = extraerTotalPorRepeticion(textoOriginal)
+  if (porRepeticion) return porRepeticion
+
+  // 4. Último respaldo: mayor monto válido, ya sin porcentajes
   const candidatos = obtenerCandidatosMontos(textoOriginal)
 
   if (candidatos.length === 0) return ''
@@ -1340,12 +1349,18 @@ function identificarTipoDocumento(textoOriginal, serie = '') {
   return 'Otro'
 }
 
-
+function quitarPorcentajes(texto) {
+  return String(texto || '')
+    .replace(/\b\d{1,3}(?:[.,]\d{1,2})?\s*%/g, ' ')
+}
 
 
 
 function extraerMontosDeLinea(linea) {
   let texto = normalizarSimbolosMoneda(String(linea || ''))
+
+  // Evita que 18,00% sea leído como S/ 18.00
+  texto = quitarPorcentajes(texto)
 
   texto = texto
     .replace(/\b(\d{1,6})\s+(\d{2})\b/g, '$1.$2')
